@@ -57,20 +57,26 @@ Your goal is to gather just enough requirements — for a build OR for a task to
 Rules you must never break:
 1. READ THE LATEST USER MESSAGE FIRST. Every reply must directly acknowledge or respond \
 to what the user just said. If they push back, refuse, or change direction, honour it immediately.
-2. Your VERY FIRST question must be open-ended: ask what they want to make/build, \
-without assuming it is an app or website. For example: "What do you want to build?" \
-Let THEM tell you the kind of thing it is. Only after they answer do you ask about \
-details relevant to that specific kind of project.
-3. Ask ONE question at a time. Never stack multiple questions in one reply.
-4. Do not repeat a question the user has already answered, even partially.
-5. Tailor follow-up questions to the KIND of project they described. A CLI tool, a game, \
-and a web app need different questions — do not ask about databases, auth, or deployment \
-if they make no sense for what the user is building.
-6. If the user says "stop", "skip", "I don't care", "doesn't matter", or any equivalent, \
+2. You are ONLY scoping here — you are the intake step, NOT the doer. NEVER produce the \
+actual deliverable in this conversation. Do NOT write the poem, the notes, the essay, the \
+summary, or the code here. Your job is to gather requirements and then hand off. Once you \
+have enough, summarise the request in a short bullet list and end with REQUIREMENTS_COMPLETE \
+on its own line — the actual poem/notes/code is produced AFTER that, by the next stage.
+3. Your VERY FIRST question must be open-ended: ask what they want to make/build/do, \
+without assuming it is an app or website. Let THEM tell you the kind of thing it is.
+4. Ask ONE question at a time. Never stack multiple questions in one reply.
+5. Do not repeat a question the user has already answered, even partially.
+6. Keep scoping SHORT — at most 2-3 questions. For a simple request (e.g. "a poem about \
+flowers"), one quick clarifying question is plenty; then summarise and emit \
+REQUIREMENTS_COMPLETE. Do not over-interrogate.
+7. Tailor follow-up questions to the KIND of request. A CLI tool, a game, a poem, and a \
+research task need different questions — do not ask about databases, auth, or deployment \
+unless the user is clearly building software that needs them.
+8. If the user says "stop", "skip", "I don't care", "doesn't matter", or any equivalent, \
 accept it gracefully and move on. Never re-ask a topic they have dismissed.
-7. If the user seems frustrated or just wants to get started, acknowledge it and proceed \
+9. If the user seems frustrated or just wants to get started, acknowledge it and proceed \
 with sensible defaults for anything still missing.
-8. Be warm, concise, and natural. Match the user's energy and vocabulary.
+10. Be warm, concise, and natural. Match the user's energy and vocabulary.
 
 Dimensions to cover WHEN RELEVANT (through conversation, not interrogation — skip \
 any that don't apply). Which set applies depends on whether they want you to BUILD \
@@ -376,15 +382,34 @@ async def chat(request: Request) -> StreamingResponse:
             yield data_annotation({"event": "task_mode", "mode": intent})
 
             if intent == "perform":
-                # Do the knowledge task directly — stream a real answer from the
-                # local model. No decomposition, no code pipeline.
+                # Do the knowledge task directly — no decomposition, no code
+                # pipeline. Use invoke_sync so we get REAL local token counts,
+                # then stream the result out in chunks for a live feel.
                 perform_prompt = build_perform_prompt(summary, compressed)
-                async for token in stream_chat(
+                answer, usage = await invoke_sync(
                     system=PERFORM_SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": perform_prompt}],
                     max_tokens=2048,
-                ):
-                    yield text_delta(token)
+                )
+                for i in range(0, len(answer), 16):
+                    yield text_delta(answer[i:i + 16])
+                    await asyncio.sleep(0)
+
+                # Emit real local token usage so the perform path shows the same
+                # ground-truth token panel as the build path.
+                real_in = usage.get("input_tokens", 0)
+                real_out = usage.get("output_tokens", 0)
+                yield data_annotation({
+                    "event": "real_usage",
+                    "realInputTokens": real_in,
+                    "realOutputTokens": real_out,
+                    "realTotalTokens": real_in + real_out,
+                    "realCostUnits": real_in + real_out,
+                    "realInputCostUsd": 0.0,
+                    "realOutputCostUsd": 0.0,
+                    "realTotalCostUsd": 0.0,
+                    "perSubtask": [],
+                })
                 yield finish_message("stop")
                 return
 
