@@ -390,7 +390,7 @@ export default function Home() {
     setIsLoading(true);
 
     // Optimistically add a placeholder assistant message we'll fill in
-    const assistantId = Date.now().toString();
+    const assistantId = `a-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     setMessages((prev) => [
       ...prev,
       { id: assistantId, role: "assistant", content: "" },
@@ -547,7 +547,7 @@ export default function Home() {
     if (!input.trim() || isLoading) return;
 
     const userMsg: Message = {
-      id: Date.now().toString(),
+      id: `u-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       role: "user",
       content: input.trim(),
     };

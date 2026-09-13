@@ -259,20 +259,48 @@ _BUILD_KEYWORDS = (
     "game", "bot", "pipeline", "code", "program", "generate a", "make a program",
 )
 
+# Strong, unambiguous signals that decide intent WITHOUT asking the (flaky,
+# non-deterministic) small local model. Creative/knowledge outputs are PERFORM;
+# explicit software artefacts are BUILD.
+_STRONG_PERFORM = (
+    "poem", "story", "essay", "haiku", "song", "lyrics", "letter", "email",
+    "notes", "research", "summary", "summarise", "summarize", "explain",
+    "analysis", "analyse", "analyze", "compare", "comparison", "outline",
+    "blog post", "article", "review of", "report on", "recipe",
+)
+_STRONG_BUILD = (
+    "web app", "website", "cli tool", "command line", "rest api", "api endpoint",
+    "python script", "react app", "next.js", "database", "backend", "frontend",
+    "library", "package", "microservice", "chrome extension", "mobile app",
+)
+
 
 async def classify_task_intent(summary: str) -> str:
     """
-    Classify the scoped requirements as 'build' or 'perform'.
+    Classify the request as 'build' (make software) or 'perform' (produce a
+    knowledge/creative output directly).
 
-    Primary: a quick one-word local model call (cheap, local, $0). Falls back to
-    a keyword heuristic if the model returns something unexpected. Defaults to
-    'build' to preserve the original behaviour when genuinely ambiguous.
+    Strategy (most reliable first):
+      1. Strong keyword match — decides immediately, no model call. This avoids
+         the small local model's non-determinism on obvious cases (a "poem" or
+         "story" is always PERFORM; a "web app" is always BUILD).
+      2. Quick local model classification for genuinely ambiguous requests.
+      3. Weak keyword heuristic as a final fallback.
     """
     text = (summary or "").strip()
     if not text:
         return "build"
+    low = text.lower()
 
-    # Fast local classification call.
+    # 1. Strong, deterministic keyword signals.
+    strong_perform = any(k in low for k in _STRONG_PERFORM)
+    strong_build = any(k in low for k in _STRONG_BUILD)
+    if strong_perform and not strong_build:
+        return "perform"
+    if strong_build and not strong_perform:
+        return "build"
+
+    # 2. Ask the local model only when strong signals are absent/conflicting.
     try:
         raw, _usage = await invoke_sync(
             system=_INTENT_SYSTEM,
@@ -285,10 +313,9 @@ async def classify_task_intent(summary: str) -> str:
         if "BUILD" in answer:
             return "build"
     except Exception:
-        pass  # fall through to heuristic
+        pass
 
-    # Heuristic fallback.
-    low = text.lower()
+    # 3. Weak keyword fallback.
     perform_hits = sum(1 for k in _PERFORM_KEYWORDS if k in low)
     build_hits = sum(1 for k in _BUILD_KEYWORDS if k in low)
     return "perform" if perform_hits > build_hits else "build"
@@ -316,6 +343,37 @@ def build_perform_prompt(summary: str, compressed: str) -> str:
         f"{summary}\n\n"
         f"(cost-optimised brief: {compressed})"
     )
+
+
+# Phrases signalling the user wants to stop scoping and just get the result.
+_PROCEED_PHRASES = (
+    "just write it", "just do it", "just build it", "just make it", "go ahead",
+    "just go", "do it now", "write it now", "make it now", "build it now",
+    "generate it", "just generate", "that's enough", "thats enough", "enough questions",
+    "stop asking", "no more questions", "just start", "let's go", "lets go", "proceed",
+)
+
+
+def user_wants_to_proceed(messages: list[dict]) -> bool:
+    """True if the latest user message signals 'stop scoping, produce the result'."""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            low = _normalise_content(m.get("content", "")).lower()
+            return any(p in low for p in _PROCEED_PHRASES)
+    return False
+
+
+def looks_like_deliverable(text: str) -> bool:
+    """
+    Heuristic: the elicitation model produced the actual deliverable (a long
+    multi-line answer) instead of a short scoping question. Small local models
+    sometimes do this despite instructions, so we detect it and route to the
+    pipeline rather than letting the answer appear only in the chat.
+    """
+    t = text.strip()
+    if "?" in t and len(t) < 300:
+        return False  # short question — normal scoping
+    return t.count("\n") >= 4 or len(t) > 600
 
 # ---------------------------------------------------------------------------
 # /api/chat  — elicitation passthrough
@@ -345,7 +403,18 @@ async def chat(request: Request) -> StreamingResponse:
                 token_count += 1
                 yield text_delta(token)
 
-            if "REQUIREMENTS_COMPLETE" in accumulated:
+            # Decide whether scoping is complete. Primary signal is the model
+            # emitting REQUIREMENTS_COMPLETE, but small local models are
+            # unreliable at that — so we ALSO complete when the user clearly
+            # wants to proceed, or when the model already produced a full
+            # deliverable instead of a scoping question. Either way we hand off
+            # to the pipeline so the result goes through compression + reporting.
+            complete = (
+                "REQUIREMENTS_COMPLETE" in accumulated
+                or user_wants_to_proceed(messages)
+                or looks_like_deliverable(accumulated)
+            )
+            if complete:
                 yield data_annotation({"event": "phase_complete", "nextPhase": "generate"})
 
             yield finish_message("stop", {"completionTokens": token_count})
