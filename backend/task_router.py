@@ -76,6 +76,23 @@ def _cost_per_token(model_id: str) -> float:
     return SONNET_COST_PER_TOKEN if model_id == HEAVY_MODEL else HAIKU_COST_PER_TOKEN
 
 
+def _short_model(model_id: str) -> str:
+    """
+    Human-friendly short label for a model id, for BOTH providers.
+
+    Local Ollama names contain dots (llama3.2:3b, qwen2.5-coder:7b) so the old
+    `split('.')[-1]` mangled them into '2:3b' / '5-coder:7b'. For cloud Bedrock
+    ids like 'us.anthropic.claude-haiku-4-5-...' we still want the last segment.
+    """
+    if not model_id:
+        return ""
+    # Local Ollama models are shown as-is (already short, e.g. 'llama3.2:3b').
+    if ":" in model_id and model_id.count(".") <= 1:
+        return model_id
+    # Cloud/Bedrock dotted ids → last dotted segment.
+    return model_id.split(".")[-1]
+
+
 # ---------------------------------------------------------------------------
 # Real USD pricing (per 1,000,000 tokens).
 #
@@ -371,7 +388,7 @@ async def run_task_router(
                 "id": t.id,
                 "title": t.title,
                 "estimatedTokens": t.estimated_tokens,
-                "model": t.assigned_model.split(".")[-1],  # short label
+                "model": _short_model(t.assigned_model),  # short label
                 "status": t.status,
             }
             for t in subtasks
@@ -388,7 +405,7 @@ async def run_task_router(
             "id": task.id,
             "title": task.title,
             "status": task.status,
-            "model": task.assigned_model.split(".")[-1],
+            "model": _short_model(task.assigned_model),
         })
 
     await emit({"event": "router_status", "stage": "executing", "message": f"Running {len(subtasks)} subtasks in parallel…"})
@@ -441,7 +458,7 @@ async def run_task_router(
             {
                 "id": t.id,
                 "title": t.title,
-                "model": t.assigned_model.split(".")[-1],
+                "model": _short_model(t.assigned_model),
                 "inputTokens": t.real_input_tokens,
                 "outputTokens": t.real_output_tokens,
                 "costUsd": round(
@@ -492,7 +509,7 @@ async def run_task_router(
         "savingsPct": savings_pct,
         "compressionSavingUsd": round(compression_saving, 6),
         "routingSavingUsd": round(routing_saving, 6),
-        "baselineModel": HEAVY_MODEL.split(".")[-1],
+        "baselineModel": _short_model(HEAVY_MODEL),
     })
 
     await emit({"event": "router_done", "subtaskCount": len(completed)})
