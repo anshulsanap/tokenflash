@@ -1,0 +1,727 @@
+"use client";
+
+import { Message } from "ai/react";
+import { useEffect, useRef, useState } from "react";
+
+interface CompressionStats {
+  originalTokens: number;
+  compressedTokens: number;
+  ratio: number;
+  multiplier: number;
+  compressedPrompt: string;
+}
+
+interface DiffToken {
+  text: string;
+  kept: boolean;
+  score: number;
+}
+
+interface CompressionDiff {
+  original: string;
+  tokens: DiffToken[];
+  multiplier: number;
+}
+
+interface RealUsagePerSubtask {
+  id: number;
+  title: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+}
+
+interface RealUsage {
+  realInputTokens: number;
+  realOutputTokens: number;
+  realTotalTokens: number;
+  realCostUnits: number;
+  realInputCostUsd: number;
+  realOutputCostUsd: number;
+  realTotalCostUsd: number;
+  perSubtask: RealUsagePerSubtask[];
+}
+
+interface SavingsBreakdown {
+  baselineCostUsd: number;
+  actualCostUsd: number;
+  totalSavingUsd: number;
+  savingsPct: number;
+  compressionSavingUsd: number;
+  routingSavingUsd: number;
+  baselineModel: string;
+}
+
+interface SubtaskInfo {
+  id: number;
+  title: string;
+  estimatedTokens: number;
+  model: string;
+  status: "pending" | "running" | "done" | "error";
+}
+
+interface RouterPlan {
+  subtasks: SubtaskInfo[];
+  totalEstimatedTokens: number;
+  savingsVsSingleCall: number;
+  savingsVsSingleCallPct: number;
+}
+
+type AppPhase = "elicit" | "generate" | "done";
+
+function ChatBubble({ msg }: { msg: Message }) {
+  const isUser = msg.role === "user";
+  const display = msg.content.replace("REQUIREMENTS_COMPLETE", "").trim();
+  if (!display) return null;
+  return (
+    <div className={`flex ${isUser ? "justify-end" : "justify-start"} mb-3`}>
+      <div className={`max-w-[82%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow-sm
+        ${isUser ? "bg-indigo-600 text-white rounded-br-sm" : "bg-slate-700 text-slate-100 rounded-bl-sm"}`}>
+        {display}
+      </div>
+    </div>
+  );
+}
+
+function StatBadge({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="flex flex-col items-center rounded-lg bg-slate-700 px-4 py-2">
+      <span className="text-xs text-slate-400 uppercase tracking-wider">{label}</span>
+      <span className="mt-1 text-lg font-mono font-bold text-indigo-400">{value}</span>
+    </div>
+  );
+}
+
+// Big "2.1×" style badge — the headline "physical token compression" figure
+// that sets this apart from model-swapping routers.
+function MultiplierBadge({ multiplier }: { multiplier: number }) {
+  return (
+    <div className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-emerald-500/20 to-teal-500/20
+                    border border-emerald-500/40 px-4 py-2">
+      <span className="text-2xl font-mono font-black text-emerald-400">
+        {multiplier.toFixed(1)}×
+      </span>
+      <span className="text-xs text-emerald-300 leading-tight">
+        smaller<br />payload
+      </span>
+    </div>
+  );
+}
+
+// Before/after diff: renders the ORIGINAL text with discarded tokens visibly
+// struck through and greyed, so the user watches their messy language get
+// physically compressed. This is the interactive, educational moment.
+function CompressionDiffPanel({ diff }: { diff: CompressionDiff }) {
+  return (
+    <div className="rounded-xl bg-slate-800 border border-slate-700 p-4 space-y-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-xs font-semibold text-emerald-300 uppercase tracking-wide">
+          Before → After Compression
+        </h3>
+        <MultiplierBadge multiplier={diff.multiplier} />
+      </div>
+
+      <div>
+        <p className="text-xs text-slate-400 uppercase tracking-wider mb-1">
+          Original — dropped tokens struck through
+        </p>
+        <div className="rounded-lg bg-slate-900 p-3 text-xs leading-relaxed break-words">
+          {diff.tokens.map((tok, i) => (
+            <span
+              key={i}
+              title={`score ${tok.score}`}
+              className={
+                tok.kept
+                  ? "text-green-300"
+                  : "text-slate-600 line-through decoration-red-500/60"
+              }
+            >
+              {tok.text}{" "}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex items-center gap-4 text-[11px] text-slate-500">
+        <span className="flex items-center gap-1">
+          <span className="inline-block h-2 w-2 rounded-full bg-green-400" /> kept
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="inline-block h-2 w-2 rounded-full bg-red-500/60" /> dropped
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// The 3-phase value story, visible at a glance. Names each phase as the
+// differentiator it represents:
+//   1. Pre-Flight Scoping  — actively scope requirements BEFORE any paid call
+//   2. Token Compression   — physically shrink the payload (2×–5×)
+//   3. Cost-Aware Routing  — send each subtask to the cheapest capable model
+function PipelineIndicator({ phase }: { phase: AppPhase }) {
+  const steps = [
+    { key: "scoping", num: 1, label: "Pre-Flight Scoping", active: phase === "elicit", done: phase !== "elicit" },
+    { key: "compress", num: 2, label: "Token Compression", active: phase === "generate", done: phase === "done" },
+    { key: "route", num: 3, label: "Cost-Aware Routing", active: phase === "generate", done: phase === "done" },
+  ];
+  return (
+    <div className="flex flex-wrap items-center gap-1 text-[10px]">
+      {steps.map((s, i) => (
+        <div key={s.key} className="flex items-center gap-1">
+          <div
+            className={`flex items-center gap-1 rounded-full px-2 py-0.5 font-medium transition
+              ${s.active ? "bg-indigo-500/25 text-indigo-300 ring-1 ring-indigo-400/50" : ""}
+              ${s.done ? "bg-green-500/15 text-green-400" : ""}
+              ${!s.active && !s.done ? "bg-slate-700/50 text-slate-500" : ""}`}
+          >
+            <span className="font-mono">{s.done ? "✓" : s.num}</span>
+            <span>{s.label}</span>
+          </div>
+          {i < steps.length - 1 && <span className="text-slate-600">→</span>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Format a small USD amount with enough precision to be meaningful for
+// fractions of a cent (Bedrock costs are tiny per request).
+function fmtUsd(v: number): string {
+  if (v === 0) return "$0";
+  if (v >= 0.01) return `$${v.toFixed(4)}`;
+  return `$${v.toFixed(6)}`;
+}
+
+// REAL Bedrock usage — the authoritative token counts AWS reports in its
+// invocation metrics (the numbers you're billed on), shown distinctly from the
+// heuristic compression estimate so the FinOps claim is credible, not guessed.
+function RealUsagePanel({ usage }: { usage: RealUsage }) {
+  const total = usage.realTotalCostUsd || 1;
+  const inputPct = (usage.realInputCostUsd / total) * 100;
+  const outputPct = (usage.realOutputCostUsd / total) * 100;
+  return (
+    <div className="rounded-xl bg-slate-800 border border-teal-600/40 p-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <h3 className="text-xs font-semibold text-teal-300 uppercase tracking-wide">
+          Real Bedrock Usage
+        </h3>
+        <span className="rounded-full bg-teal-500/20 px-2 py-0.5 text-[10px] font-medium text-teal-300">
+          billed by AWS · not estimated
+        </span>
+      </div>
+
+      <div className="flex gap-3 flex-wrap">
+        <StatBadge label="Real Input Tokens" value={usage.realInputTokens.toLocaleString()} />
+        <StatBadge label="Real Output Tokens" value={usage.realOutputTokens.toLocaleString()} />
+        <StatBadge label="Real Total" value={usage.realTotalTokens.toLocaleString()} />
+      </div>
+
+      {/* Real dollar cost — split by input vs output (priced differently) */}
+      <div className="rounded-lg bg-slate-900 p-3 space-y-2">
+        <div className="flex items-center justify-between">
+          <span className="text-[10px] uppercase tracking-wider text-slate-500">
+            Real cost (AWS prices)
+          </span>
+          <span className="font-mono text-sm font-bold text-teal-300">
+            {fmtUsd(usage.realTotalCostUsd)}
+          </span>
+        </div>
+        {/* proportion bar */}
+        <div className="flex h-2 w-full overflow-hidden rounded-full bg-slate-700">
+          <div className="bg-sky-500" style={{ width: `${inputPct}%` }} title="input cost" />
+          <div className="bg-amber-500" style={{ width: `${outputPct}%` }} title="output cost" />
+        </div>
+        <div className="flex justify-between text-[11px]">
+          <span className="text-sky-400">
+            ● Input {fmtUsd(usage.realInputCostUsd)}{" "}
+            <span className="text-slate-500">({inputPct.toFixed(1)}%)</span>
+          </span>
+          <span className="text-amber-400">
+            Output {fmtUsd(usage.realOutputCostUsd)}{" "}
+            <span className="text-slate-500">({outputPct.toFixed(1)}%)</span> ●
+          </span>
+        </div>
+        <p className="text-[10px] text-slate-500 leading-relaxed">
+          Input compression shrinks the blue slice. Output — the amber slice — is
+          the bulk of the cost, and is minimised by routing to the cheapest
+          capable model rather than by compression.
+        </p>
+      </div>
+
+      {usage.perSubtask.length > 0 && (
+        <div className="space-y-1">
+          <p className="text-[10px] uppercase tracking-wider text-slate-500">
+            Per subtask (input → output · cost)
+          </p>
+          {usage.perSubtask.map((s) => (
+            <div key={s.id} className="flex items-center justify-between rounded-lg bg-slate-900 px-3 py-1.5">
+              <span className="text-xs text-slate-200 truncate mr-2">{s.title}</span>
+              <span className="font-mono text-[11px] text-teal-300 shrink-0">
+                {s.inputTokens.toLocaleString()} → {s.outputTokens.toLocaleString()}
+                <span className="text-slate-500"> · {fmtUsd(s.costUsd)}</span>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <p className="text-[10px] text-slate-500 leading-relaxed">
+        These are the exact input/output token counts AWS Bedrock reported for
+        every model call in this run. The compression report above is a
+        heuristic estimate; this panel is ground truth.
+      </p>
+    </div>
+  );
+}
+
+// The headline value story: honest combined savings vs the naive baseline
+// (one uncompressed call to the premium model), attributed to the two real
+// levers. This is what makes the pitch defensible — it shows routing does most
+// of the work and compression adds the rest, rather than overclaiming.
+function SavingsBreakdownPanel({ s }: { s: SavingsBreakdown }) {
+  const pct = s.totalSavingUsd > 0 ? s.totalSavingUsd : 1;
+  const compPct = (s.compressionSavingUsd / pct) * 100;
+  const routePct = (s.routingSavingUsd / pct) * 100;
+  return (
+    <div className="rounded-xl bg-gradient-to-br from-emerald-900/40 to-slate-800 border border-emerald-500/40 p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <h3 className="text-xs font-semibold text-emerald-300 uppercase tracking-wide">
+          Cost Savings vs Naive Baseline
+        </h3>
+        <span className="font-mono text-2xl font-black text-emerald-400">
+          {(s.savingsPct * 100).toFixed(0)}%
+        </span>
+      </div>
+
+      <div className="flex items-center justify-between text-xs">
+        <div className="flex flex-col">
+          <span className="text-slate-500 text-[10px] uppercase">Naive baseline</span>
+          <span className="font-mono text-slate-400 line-through">{fmtUsd(s.baselineCostUsd)}</span>
+          <span className="text-[10px] text-slate-500">1 uncompressed call · {s.baselineModel}</span>
+        </div>
+        <span className="text-emerald-400 text-lg">→</span>
+        <div className="flex flex-col items-end">
+          <span className="text-slate-500 text-[10px] uppercase">This pipeline</span>
+          <span className="font-mono text-emerald-300 font-bold">{fmtUsd(s.actualCostUsd)}</span>
+          <span className="text-[10px] text-emerald-500">saved {fmtUsd(s.totalSavingUsd)}</span>
+        </div>
+      </div>
+
+      {/* Two-lever attribution */}
+      <div className="space-y-1.5">
+        <p className="text-[10px] uppercase tracking-wider text-slate-500">
+          Where the savings come from
+        </p>
+        <div className="flex h-2.5 w-full overflow-hidden rounded-full bg-slate-700">
+          <div className="bg-purple-500" style={{ width: `${routePct}%` }} title="model routing" />
+          <div className="bg-emerald-500" style={{ width: `${compPct}%` }} title="input compression" />
+        </div>
+        <div className="flex justify-between text-[11px]">
+          <span className="text-purple-300">
+            ● Model routing {fmtUsd(s.routingSavingUsd)}{" "}
+            <span className="text-slate-500">({routePct.toFixed(0)}%)</span>
+          </span>
+          <span className="text-emerald-300">
+            Input compression {fmtUsd(s.compressionSavingUsd)}{" "}
+            <span className="text-slate-500">({compPct.toFixed(0)}%)</span> ●
+          </span>
+        </div>
+      </div>
+
+      <p className="text-[10px] text-slate-500 leading-relaxed">
+        Baseline = one uncompressed call to {s.baselineModel} (the premium model).
+        Two levers cut the bill: routing each subtask to the cheapest capable
+        model, and compressing the input prompt. The split is honest — routing
+        usually dominates because output tokens carry most of the cost.
+      </p>
+    </div>
+  );
+}
+
+export default function Home() {
+  const [phase, setPhase] = useState<AppPhase>("elicit");
+  const [canGenerate, setCanGenerate] = useState(false);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [input, setInput] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [stats, setStats] = useState<CompressionStats | null>(null);
+  const [compressionDiff, setCompressionDiff] = useState<CompressionDiff | null>(null);
+  const [realUsage, setRealUsage] = useState<RealUsage | null>(null);
+  const [savings, setSavings] = useState<SavingsBreakdown | null>(null);
+  const [routerPlan, setRouterPlan] = useState<RouterPlan | null>(null);
+  const [routerStatus, setRouterStatus] = useState<string>("");
+  const [subtaskStatuses, setSubtaskStatuses] = useState<Record<number, SubtaskInfo["status"]>>({});
+  const [generatedCode, setGeneratedCode] = useState("");
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  // Core streaming fetch — works for both elicit and generate phases
+  const streamFromBackend = async (phase: AppPhase, msgs: Message[]) => {
+    setIsLoading(true);
+
+    // Optimistically add a placeholder assistant message we'll fill in
+    const assistantId = Date.now().toString();
+    setMessages((prev) => [
+      ...prev,
+      { id: assistantId, role: "assistant", content: "" },
+    ]);
+
+    try {
+      const resp = await fetch("http://localhost:8000/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          phase,
+          messages: msgs.map((m) => ({ role: m.role, content: m.content })),
+        }),
+      });
+
+      if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let accumulated = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const text = decoder.decode(value);
+        for (const line of text.split("\n")) {
+          // Text delta
+          if (line.startsWith("0:")) {
+            try {
+              const token = JSON.parse(line.slice(2));
+              accumulated += token;
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId ? { ...m, content: accumulated } : m
+                )
+              );
+            } catch { /* partial */ }
+          }
+          // Data annotation
+          if (line.startsWith("2:")) {
+            try {
+              const payload = JSON.parse(line.slice(2))[0];
+              if (payload?.event === "phase_complete") setCanGenerate(true);
+              if (payload?.event === "compression_stats") {
+                setStats({
+                  originalTokens: payload.originalTokens,
+                  compressedTokens: payload.compressedTokens,
+                  ratio: payload.ratio,
+                  multiplier: payload.multiplier ?? 1,
+                  compressedPrompt: payload.compressedPrompt,
+                });
+              }
+              if (payload?.event === "compression_diff") {
+                setCompressionDiff({
+                  original: payload.original,
+                  tokens: payload.tokens,
+                  multiplier: payload.multiplier ?? 1,
+                });
+              }
+              if (payload?.event === "router_plan") {
+                setRouterPlan({
+                  subtasks: payload.subtasks,
+                  totalEstimatedTokens: payload.totalEstimatedTokens,
+                  savingsVsSingleCall: payload.savingsVsSingleCall,
+                  savingsVsSingleCallPct: payload.savingsVsSingleCallPct ?? 0,
+                });
+              }
+              if (payload?.event === "router_status") {
+                setRouterStatus(payload.message);
+              }
+              if (payload?.event === "subtask_update") {
+                setSubtaskStatuses((prev) => ({ ...prev, [payload.id]: payload.status }));
+                setRouterPlan((prev) => {
+                  if (!prev) return prev;
+                  return {
+                    ...prev,
+                    subtasks: prev.subtasks.map((t) =>
+                      t.id === payload.id ? { ...t, status: payload.status } : t
+                    ),
+                  };
+                });
+              }
+              if (payload?.event === "real_usage") {
+                setRealUsage({
+                  realInputTokens: payload.realInputTokens,
+                  realOutputTokens: payload.realOutputTokens,
+                  realTotalTokens: payload.realTotalTokens,
+                  realCostUnits: payload.realCostUnits,
+                  realInputCostUsd: payload.realInputCostUsd ?? 0,
+                  realOutputCostUsd: payload.realOutputCostUsd ?? 0,
+                  realTotalCostUsd: payload.realTotalCostUsd ?? 0,
+                  perSubtask: payload.perSubtask ?? [],
+                });
+              }
+              if (payload?.event === "savings_breakdown") {
+                setSavings({
+                  baselineCostUsd: payload.baselineCostUsd,
+                  actualCostUsd: payload.actualCostUsd,
+                  totalSavingUsd: payload.totalSavingUsd,
+                  savingsPct: payload.savingsPct,
+                  compressionSavingUsd: payload.compressionSavingUsd,
+                  routingSavingUsd: payload.routingSavingUsd,
+                  baselineModel: payload.baselineModel,
+                });
+              }
+            } catch { /* partial */ }
+          }
+        }
+      }
+
+      if (phase === "generate") {
+        setGeneratedCode(accumulated);
+        setPhase("done");
+      }
+    } catch (err) {
+      console.error(err);
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId
+            ? { ...m, content: "⚠️ Error connecting to backend." }
+            : m
+        )
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const sendMessage = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!input.trim() || isLoading) return;
+
+    const userMsg: Message = {
+      id: Date.now().toString(),
+      role: "user",
+      content: input.trim(),
+    };
+
+    const updatedMsgs = [...messages, userMsg];
+    setMessages(updatedMsgs);
+    setInput("");                    // clear AFTER we've captured the value
+
+    await streamFromBackend("elicit", updatedMsgs);
+  };
+
+  const triggerGenerate = async () => {
+    setPhase("generate");
+    setGeneratedCode("");
+    setStats(null);
+    setCompressionDiff(null);
+    setRealUsage(null);
+    setSavings(null);
+    setRouterPlan(null);
+    setRouterStatus("");
+    setSubtaskStatuses({});
+    await streamFromBackend("generate", messages);
+  };
+
+  return (
+    <div className="flex h-screen bg-slate-900 text-slate-100 font-sans overflow-hidden">
+
+      {/* LEFT PANE */}
+      <section className="flex w-1/2 flex-col border-r border-slate-700">
+        <header className="border-b border-slate-700 bg-slate-800 px-5 py-3 shrink-0 space-y-2.5">
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-sm font-bold text-indigo-400">🎸 Token Punk Records</h1>
+              <p className="text-xs text-slate-400">Interactive AI FinOps · scopes &amp; compresses before you pay</p>
+            </div>
+            <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium
+              ${phase === "elicit" ? "bg-amber-500/20 text-amber-400" : ""}
+              ${phase === "generate" ? "bg-blue-500/20 text-blue-400" : ""}
+              ${phase === "done" ? "bg-green-500/20 text-green-400" : ""}`}>
+              {phase === "elicit" ? "Pre-Flight Scoping" : phase === "generate" ? "Compressing & Routing…" : "Complete"}
+            </span>
+          </div>
+          <PipelineIndicator phase={phase} />
+        </header>
+
+        <div className="flex-1 overflow-y-auto px-5 py-4">
+          {messages.length === 0 && (
+            <div className="mt-10 mx-auto max-w-sm text-center space-y-3">
+              <p className="text-sm font-medium text-slate-300">
+                ✈️ Pre-Flight Requirement Scoping
+              </p>
+              <p className="text-xs text-slate-500 leading-relaxed">
+                Most AI routers forward whatever you type straight to an expensive model.
+                This one pushes back first — it interviews you to lock down exact
+                requirements, so a vague, costly prompt never reaches AWS Bedrock.
+                Describe what you want to build to begin.
+              </p>
+            </div>
+          )}
+          {messages.map((m) => <ChatBubble key={m.id} msg={m} />)}
+          <div ref={bottomRef} />
+        </div>
+
+        <div className="border-t border-slate-700 bg-slate-800 p-4 shrink-0 space-y-2">
+          {phase === "elicit" && (
+            <form onSubmit={sendMessage} className="flex gap-2">
+              <input
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder="What do you want to build?"
+                disabled={isLoading}
+                autoFocus
+                className="flex-1 rounded-xl bg-slate-700 px-4 py-2 text-sm text-slate-100
+                           placeholder-slate-500 outline-none ring-1 ring-slate-600
+                           focus:ring-indigo-500 disabled:opacity-50 transition"
+              />
+              <button
+                type="submit"
+                disabled={isLoading || !input.trim()}
+                className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white
+                           hover:bg-indigo-500 disabled:opacity-40 transition"
+              >
+                {isLoading ? "…" : "Send"}
+              </button>
+            </form>
+          )}
+
+          {canGenerate && phase === "elicit" && (
+            <div className="space-y-1.5">
+              <p className="text-center text-[11px] text-green-400">
+                ✓ Requirements scoped — safe to hit the paid pipeline
+              </p>
+              <button
+                onClick={triggerGenerate}
+                disabled={isLoading}
+                className="w-full rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600
+                           py-2.5 text-sm font-semibold text-white shadow-lg hover:opacity-90
+                           disabled:opacity-40 transition"
+              >
+                ⚡ Compress &amp; Route to Bedrock
+              </button>
+            </div>
+          )}
+
+          {phase !== "elicit" && (
+            <p className="text-center text-xs text-slate-500">
+              {phase === "generate" ? "Compressing payload → routing to cheapest models…" : "✅ Done. See right pane."}
+            </p>
+          )}
+        </div>
+      </section>
+
+      {/* RIGHT PANE */}
+      <section className="flex w-1/2 flex-col">
+        <header className="border-b border-slate-700 bg-slate-800 px-5 py-3 shrink-0">
+          <h2 className="text-sm font-bold text-purple-400">Live Preview</h2>
+          <p className="text-xs text-slate-400">Compression stats &amp; generated output</p>
+        </header>
+
+        <div className="flex-1 overflow-y-auto p-5 space-y-5">
+          {stats ? (
+            <div className="rounded-xl bg-slate-800 border border-slate-700 p-4 space-y-4">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-semibold text-purple-300 uppercase tracking-wide">
+                  Token Compression Report
+                </h3>
+                <span className="rounded-full bg-emerald-500/20 px-2.5 py-0.5 text-xs font-mono font-bold text-emerald-400">
+                  {stats.multiplier.toFixed(1)}× smaller
+                </span>
+              </div>
+              <div className="flex gap-3 flex-wrap">
+                <StatBadge label="Original Tokens" value={stats.originalTokens} />
+                <StatBadge label="Compressed Tokens" value={stats.compressedTokens} />
+                <StatBadge label="Savings" value={`${(stats.ratio * 100).toFixed(1)}%`} />
+              </div>
+              <div>
+                <p className="text-xs text-slate-400 uppercase tracking-wider mb-1">Compressed Prompt</p>
+                <pre className="rounded-lg bg-slate-900 p-3 text-xs text-green-400 overflow-x-auto whitespace-pre-wrap break-all">
+                  {stats.compressedPrompt}
+                </pre>
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-xl border border-dashed border-slate-700 bg-slate-800/50 p-8 text-center">
+              <p className="text-slate-500 text-sm">
+                Compression stats will appear here after you click{" "}
+                <span className="text-indigo-400 font-medium">⚡ Compress &amp; Route to Bedrock</span>.
+              </p>
+            </div>
+          )}
+
+          {/* Before/After compression diff — the interactive differentiator */}
+          {compressionDiff && compressionDiff.tokens.length > 0 && (
+            <CompressionDiffPanel diff={compressionDiff} />
+          )}
+
+          {/* Task router progress */}
+          {(routerStatus || routerPlan) && (
+            <div className="rounded-xl bg-slate-800 border border-slate-700 p-4 space-y-3">
+              <h3 className="text-xs font-semibold text-amber-300 uppercase tracking-wide">
+                Task Router
+              </h3>
+              {routerStatus && (
+                <p className="text-xs text-slate-400 italic">{routerStatus}</p>
+              )}
+              {routerPlan && (
+                <>
+                  <div className="flex gap-3 flex-wrap">
+                    <StatBadge label="Subtasks" value={routerPlan.subtasks.length} />
+                    <StatBadge label="Est. Tokens" value={routerPlan.totalEstimatedTokens} />
+                    <StatBadge
+                      label="Cost Savings vs Single"
+                      value={`${(routerPlan.savingsVsSingleCallPct * 100).toFixed(0)}%`}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    {routerPlan.subtasks.map((t) => (
+                      <div key={t.id} className="flex items-center justify-between rounded-lg bg-slate-900 px-3 py-2">
+                        <div className="flex items-center gap-2">
+                          <span className={`h-2 w-2 rounded-full shrink-0
+                            ${t.status === "done"    ? "bg-green-400" : ""}
+                            ${t.status === "running" ? "bg-amber-400 animate-pulse" : ""}
+                            ${t.status === "pending" ? "bg-slate-500" : ""}
+                            ${t.status === "error"   ? "bg-red-400" : ""}`}
+                          />
+                          <span className="text-xs text-slate-200">{t.title}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] text-slate-500">{t.estimatedTokens} tok</span>
+                          <span className="rounded px-1.5 py-0.5 text-[10px] bg-slate-700 text-indigo-300">{t.model}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Headline value story — honest combined savings vs naive baseline */}
+          {savings && <SavingsBreakdownPanel s={savings} />}
+
+          {/* Real Bedrock usage — ground-truth billed tokens */}
+          {realUsage && <RealUsagePanel usage={realUsage} />}
+
+
+          {((isLoading && phase === "generate") || generatedCode) && (
+            <div className="rounded-xl bg-slate-800 border border-slate-700 p-4">
+              <h3 className="text-xs font-semibold text-green-300 uppercase tracking-wide mb-3 flex items-center gap-2">
+                Generated Code
+                {isLoading && phase === "generate" && (
+                  <span className="h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse" />
+                )}
+              </h3>
+              <pre className="rounded-lg bg-slate-900 p-4 text-xs text-slate-200 overflow-x-auto whitespace-pre-wrap leading-relaxed">
+                {generatedCode || "Streaming…"}
+              </pre>
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}

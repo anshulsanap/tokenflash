@@ -1,0 +1,17 @@
+# AI FinOps Router — Python backend dependencies
+# Pin exact versions for reproducible hackathon builds
+
+# Web framework & ASGI server
+fastapi==0.115.14
+uvicorn[standard]==0.34.3
+python-dotenv==1.1.1
+
+# AWS SDK
+boto3==1.39.9
+botocore==1.39.9
+
+# HTTP client (used by optional routing-model calls)
+httpx==0.28.1
+
+# Typing backports (Python < 3.12)
+typing-extensions==4.14.1
