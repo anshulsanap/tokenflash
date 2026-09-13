@@ -16,7 +16,7 @@ from fastapi.responses import StreamingResponse
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 
-from bedrock_client import stream_claude_chat, stream_bedrock_response
+from llm_provider import stream_chat, stream_response, invoke_sync, PROVIDER
 from compressor import compress_prompt, compress_prompt_detailed
 from task_router import run_task_router
 
@@ -35,16 +35,24 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 
 ARCHITECT_SYSTEM_PROMPT = """\
-You are a dynamic, human-like technical architect who helps people build software \
-of ANY kind — a website, a CLI tool, an API, a game, an automation script, a data \
-pipeline, a bot, a library, whatever they have in mind. A web app is just ONE \
-possibility; never assume it. \
+You are a dynamic, human-like assistant who helps people EITHER build software \
+OR get a knowledge task done. You handle both: \
+(1) BUILDING software — a website, CLI tool, API, game, script, bot, library; and \
+(2) PERFORMING knowledge tasks — researching a topic, producing structured notes, \
+summarising, analysing, comparing, explaining, or writing. \
+Never assume it's a web app. \
 You MUST read the user's latest message and react to it. \
 If they say stop, change the subject, or reject a feature, you must adapt immediately. \
 Do not just loop through a hardcoded list of questions.
 
-Your goal is to gather enough requirements to generate the right code for whatever \
-they want to build, through real conversation — not a script.
+CRITICAL — never refuse a request as "out of scope." If a user asks you to research, \
+take notes, summarise, explain, analyse, or fact-check, treat that as a real task you \
+WILL perform (the system will have you produce the actual result) — gather what you \
+need (topic, scope, output format) rather than declining. If instead they want a piece \
+of software, gather build requirements. Either way, help them; do not say you cannot.
+
+Your goal is to gather just enough requirements — for a build OR for a task to perform \
+— through real conversation, not a script.
 
 Rules you must never break:
 1. READ THE LATEST USER MESSAGE FIRST. Every reply must directly acknowledge or respond \
@@ -64,8 +72,11 @@ accept it gracefully and move on. Never re-ask a topic they have dismissed.
 with sensible defaults for anything still missing.
 8. Be warm, concise, and natural. Match the user's energy and vocabulary.
 
-Dimensions to cover WHEN RELEVANT to the kind of project (through conversation, not \
-interrogation — skip any that don't apply):
+Dimensions to cover WHEN RELEVANT (through conversation, not interrogation — skip \
+any that don't apply). Which set applies depends on whether they want you to BUILD \
+software or PERFORM a knowledge task:
+
+If they want to BUILD software (app, tool, script, etc.):
 - What the thing is and who/what it's for
 - The core features or behaviour it must have
 - Language / framework / tech preferences (or sensible defaults)
@@ -73,12 +84,19 @@ interrogation — skip any that don't apply):
 - How it runs or is used (CLI, web, service, library, etc.)
 - Any integrations, auth, or deployment needs — only if applicable
 
+If they want you to PERFORM a task (research, notes, summary, analysis, explanation):
+- The exact topic or question, and its scope/depth
+- The output format they want (structured notes, bullet summary, comparison table, essay)
+- Any focus, angle, audience, or constraints
+- Do NOT ask about programming language, database, hosting, or deployment — those \
+  are irrelevant to a knowledge task.
+
 Once you have enough to work with — explicit answers or accepted defaults — summarise \
 what you have in a short bullet list, then end your message with exactly this line by itself:
 REQUIREMENTS_COMPLETE
 
-Do not include REQUIREMENTS_COMPLETE until you genuinely have enough to generate code. \
-If the user just wants to go, state the defaults you will use and include REQUIREMENTS_COMPLETE.\
+Do not include REQUIREMENTS_COMPLETE until you genuinely have enough. If the user just \
+wants to go, state the defaults you will use and include REQUIREMENTS_COMPLETE.\
 """
 
 # ---------------------------------------------------------------------------
@@ -206,6 +224,93 @@ def build_generation_prompt(summary: str, compressed: str) -> str:
         "Respond with well-structured, commented code only."
     )
 
+
+# ---------------------------------------------------------------------------
+# Task-type routing: BUILD (make software) vs PERFORM (do a knowledge task)
+# ---------------------------------------------------------------------------
+
+_INTENT_SYSTEM = (
+    "You are a classifier. Decide whether the user's request is asking to BUILD "
+    "a piece of software/tool, or to PERFORM a knowledge task directly (research, "
+    "notes, summary, analysis, explanation, comparison, writing).\n"
+    "Reply with EXACTLY one word: BUILD or PERFORM. No punctuation, no explanation.\n"
+    "Examples:\n"
+    "  'a CLI tool to rename files' -> BUILD\n"
+    "  'a website for my bakery' -> BUILD\n"
+    "  'research recent papers on RAG and give me structured notes' -> PERFORM\n"
+    "  'summarise this topic into bullet points' -> PERFORM\n"
+    "  'explain how diffusion models work' -> PERFORM\n"
+    "  'build me a script that summarises papers' -> BUILD\n"
+)
+
+_PERFORM_KEYWORDS = (
+    "research", "notes", "summar", "explain", "analy", "compare", "comparison",
+    "fact-check", "fact check", "overview", "review the", "write ", "draft",
+    "brief", "report on", "study ", "learn about", "tell me about",
+)
+_BUILD_KEYWORDS = (
+    "build", "app", "website", "cli", "tool", "script", "api", "library",
+    "game", "bot", "pipeline", "code", "program", "generate a", "make a program",
+)
+
+
+async def classify_task_intent(summary: str) -> str:
+    """
+    Classify the scoped requirements as 'build' or 'perform'.
+
+    Primary: a quick one-word local model call (cheap, local, $0). Falls back to
+    a keyword heuristic if the model returns something unexpected. Defaults to
+    'build' to preserve the original behaviour when genuinely ambiguous.
+    """
+    text = (summary or "").strip()
+    if not text:
+        return "build"
+
+    # Fast local classification call.
+    try:
+        raw, _usage = await invoke_sync(
+            system=_INTENT_SYSTEM,
+            messages=[{"role": "user", "content": text[:2000]}],
+            max_tokens=4,
+        )
+        answer = raw.strip().upper()
+        if "PERFORM" in answer:
+            return "perform"
+        if "BUILD" in answer:
+            return "build"
+    except Exception:
+        pass  # fall through to heuristic
+
+    # Heuristic fallback.
+    low = text.lower()
+    perform_hits = sum(1 for k in _PERFORM_KEYWORDS if k in low)
+    build_hits = sum(1 for k in _BUILD_KEYWORDS if k in low)
+    return "perform" if perform_hits > build_hits else "build"
+
+
+PERFORM_SYSTEM_PROMPT = (
+    "You are a knowledgeable assistant running locally. PERFORM the task the user "
+    "describes and produce the actual result directly — do NOT write code, and do "
+    "NOT treat the request as a software specification.\n\n"
+    "Guidelines:\n"
+    "- If asked to research or summarise a topic, produce clear, well-structured "
+    "notes using markdown headings and bullet points.\n"
+    "- Be accurate and concrete. If you are uncertain or the topic may be beyond "
+    "your training, say so briefly rather than inventing facts. You cannot browse "
+    "the web, so base answers on what you know.\n"
+    "- Match the output format the user asked for (notes, summary, comparison, etc.).\n"
+    "- Be thorough but focused; no filler."
+)
+
+
+def build_perform_prompt(summary: str, compressed: str) -> str:
+    """Assemble the prompt for a PERFORM task from the compressed requirements."""
+    return (
+        "Perform the following task and return the finished result directly:\n\n"
+        f"{summary}\n\n"
+        f"(cost-optimised brief: {compressed})"
+    )
+
 # ---------------------------------------------------------------------------
 # /api/chat  — elicitation passthrough
 # ---------------------------------------------------------------------------
@@ -225,7 +330,7 @@ async def chat(request: Request) -> StreamingResponse:
 
             accumulated = ""
             token_count = 0
-            async for token in stream_claude_chat(
+            async for token in stream_chat(
                 system=ARCHITECT_SYSTEM_PROMPT,
                 messages=claude_messages,
                 max_tokens=512,
@@ -266,6 +371,24 @@ async def chat(request: Request) -> StreamingResponse:
                 "multiplier": stats["multiplier"],
             })
 
+            # ── Task-type routing: PERFORM the task or BUILD a tool ──────────
+            intent = await classify_task_intent(summary)
+            yield data_annotation({"event": "task_mode", "mode": intent})
+
+            if intent == "perform":
+                # Do the knowledge task directly — stream a real answer from the
+                # local model. No decomposition, no code pipeline.
+                perform_prompt = build_perform_prompt(summary, compressed)
+                async for token in stream_chat(
+                    system=PERFORM_SYSTEM_PROMPT,
+                    messages=[{"role": "user", "content": perform_prompt}],
+                    max_tokens=2048,
+                ):
+                    yield text_delta(token)
+                yield finish_message("stop")
+                return
+
+            # ── BUILD path (existing code pipeline) ──────────────────────────
             # Buffer for router events collected before we can yield them
             pending_events: list[tuple] = []
             done = False
@@ -314,7 +437,16 @@ async def chat(request: Request) -> StreamingResponse:
 
 @app.get("/health")
 async def health():
+    if PROVIDER != "bedrock":
+        return {
+            "status": "ok",
+            "provider": "local",
+            "lightModel": os.getenv("ROUTER_MODEL_LIGHT", "llama3.2:3b"),
+            "heavyModel": os.getenv("ROUTER_MODEL_HEAVY", "qwen2.5-coder:7b"),
+            "ollamaHost": os.getenv("OLLAMA_HOST", "http://localhost:11434"),
+        }
     return {
         "status": "ok",
+        "provider": "bedrock",
         "model": os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0"),
     }

@@ -5,9 +5,9 @@ import "./globals.css";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Token Punk Records — AI FinOps Router",
+  title: "TokenQuick — Local AI, Optimized",
   description:
-    "Intercept, compress, and route LLM requests to AWS Bedrock at minimum cost.",
+    "Scope, compress, and route LLM requests across local models — $0 API cost.",
 };
 
 export default function RootLayout({

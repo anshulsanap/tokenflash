@@ -24,38 +24,48 @@ import os
 from dataclasses import dataclass, field
 from typing import AsyncGenerator
 
-from bedrock_client import invoke_claude_sync, stream_claude_chat
+from llm_provider import invoke_sync, is_local
 
 # ---------------------------------------------------------------------------
-# Model registry
+# Model registry — provider-aware
+#
+# The project runs LOCALLY by default (Ollama), so the two routing tiers map to
+# a light and a heavy LOCAL model. When LLM_PROVIDER=bedrock, they fall back to
+# the cloud Claude tiers. The internal names LIGHT_MODEL / HEAVY_MODEL replace
+# the old Haiku/Sonnet naming to reflect that these are just "cheap vs capable"
+# tiers regardless of provider.
 # ---------------------------------------------------------------------------
 
-HAIKU_MODEL = os.getenv(
-    "ROUTER_MODEL_HAIKU",
-    "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-)
-SONNET_MODEL = os.getenv(
-    "ROUTER_MODEL_SONNET",
-    "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-)
+if is_local():
+    LIGHT_MODEL = os.getenv("ROUTER_MODEL_LIGHT", "llama3.2:3b")
+    HEAVY_MODEL = os.getenv("ROUTER_MODEL_HEAVY", "qwen2.5-coder:7b")
+else:
+    LIGHT_MODEL = os.getenv(
+        "ROUTER_MODEL_HAIKU", "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    )
+    HEAVY_MODEL = os.getenv(
+        "ROUTER_MODEL_SONNET", "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    )
 
-# If a subtask's estimated input tokens exceed this, escalate to Sonnet
+# Backward-compatible aliases (older code / tests referenced these names).
+HAIKU_MODEL = LIGHT_MODEL
+SONNET_MODEL = HEAVY_MODEL
+
+# If a subtask's estimated input tokens exceed this, escalate to the heavy tier
 HAIKU_TOKEN_LIMIT = int(os.getenv("HAIKU_TOKEN_LIMIT", "600"))
 
-# Max output tokens per subtask. Code generation is verbose; at 2048 (and even
-# 4096) every subtask was truncated mid-file. Claude Haiku 4.5 supports a much
-# larger output budget, so 8192 lets a typical file finish. A small task still
-# stops early (the model only uses what it needs), so this caps cost only for
-# genuinely large files. Configurable via .env.
+# Max output tokens per subtask. Code generation is verbose; keep generous so a
+# file finishes instead of truncating. Local models simply take a bit longer;
+# there is no per-token bill. Configurable via .env.
 SUBTASK_MAX_TOKENS = int(os.getenv("SUBTASK_MAX_TOKENS", "8192"))
 # The decomposer only emits a short JSON plan, so it needs far fewer tokens.
 DECOMPOSER_MAX_TOKENS = int(os.getenv("DECOMPOSER_MAX_TOKENS", "1024"))
 
 # ---------------------------------------------------------------------------
-# Relative cost weights (per token) used to compute meaningful cost savings.
-# These are RELATIVE multipliers, not dollar prices — they mirror the public
-# Bedrock price ratio between the tiers (Sonnet ≈ 3x the cost of Haiku for
-# both input and output tokens). Override via .env if pricing changes.
+# Relative cost weights (per token) — used only for the routing-savings story.
+# Local models cost $0 in API fees, but the heavy tier still "costs" more in
+# compute/time, so we keep a relative weight so routing to the light model
+# still shows as a saving. For bedrock these mirror the cloud price ratio.
 # ---------------------------------------------------------------------------
 HAIKU_COST_PER_TOKEN = float(os.getenv("HAIKU_COST_PER_TOKEN", "1.0"))
 SONNET_COST_PER_TOKEN = float(os.getenv("SONNET_COST_PER_TOKEN", "3.0"))
@@ -63,14 +73,18 @@ SONNET_COST_PER_TOKEN = float(os.getenv("SONNET_COST_PER_TOKEN", "3.0"))
 
 def _cost_per_token(model_id: str) -> float:
     """Relative per-token cost weight for a given model id."""
-    return SONNET_COST_PER_TOKEN if model_id == SONNET_MODEL else HAIKU_COST_PER_TOKEN
+    return SONNET_COST_PER_TOKEN if model_id == HEAVY_MODEL else HAIKU_COST_PER_TOKEN
 
 
 # ---------------------------------------------------------------------------
-# Real USD pricing (per 1,000,000 tokens) — Anthropic Claude 4.5 tier on
-# Bedrock. Input and output are priced DIFFERENTLY (output is 5x input for
-# Haiku), which is exactly why an input/output cost split matters. Override any
-# of these via .env if AWS pricing changes.
+# Real USD pricing (per 1,000,000 tokens).
+#
+# LOCAL provider: API cost is $0 — the model runs on the user's machine. That
+# is the entire value proposition, so local prices are zero.
+#
+# We ALSO keep the cloud (Bedrock/Claude) prices around as a reference so the
+# UI can answer "what would this have cost on the cloud?" — turning the local
+# run's real token counts into an "amount you DIDN'T pay" figure.
 #   Haiku 4.5 : $1.00 / 1M input, $5.00 / 1M output
 #   Sonnet 4.5: $3.00 / 1M input, $15.00 / 1M output
 # ---------------------------------------------------------------------------
@@ -81,8 +95,24 @@ SONNET_USD_PER_1M_OUTPUT = float(os.getenv("SONNET_USD_PER_1M_OUTPUT", "15.0"))
 
 
 def _usd_prices(model_id: str) -> tuple[float, float]:
-    """Return (input_usd_per_token, output_usd_per_token) for a model id."""
-    if model_id == SONNET_MODEL:
+    """
+    Real (input, output) USD-per-token actually paid. For local models this is
+    (0, 0) — nothing is billed. For bedrock it's the tier's cloud price.
+    """
+    if is_local():
+        return 0.0, 0.0
+    if model_id == HEAVY_MODEL:
+        return SONNET_USD_PER_1M_INPUT / 1_000_000, SONNET_USD_PER_1M_OUTPUT / 1_000_000
+    return HAIKU_USD_PER_1M_INPUT / 1_000_000, HAIKU_USD_PER_1M_OUTPUT / 1_000_000
+
+
+def _cloud_equivalent_prices(model_id: str) -> tuple[float, float]:
+    """
+    What the SAME work would cost on the cloud (Claude), used to show the
+    "you avoided paying $X by running locally" figure. Always returns cloud
+    prices regardless of provider.
+    """
+    if model_id == HEAVY_MODEL:
         return SONNET_USD_PER_1M_INPUT / 1_000_000, SONNET_USD_PER_1M_OUTPUT / 1_000_000
     return HAIKU_USD_PER_1M_INPUT / 1_000_000, HAIKU_USD_PER_1M_OUTPUT / 1_000_000
 
@@ -116,19 +146,30 @@ DECOMPOSER_SYSTEM = """\
 You are a software project decomposer. Given compressed project requirements, \
 split the work into independent, self-contained coding subtasks.
 
+FIRST, infer WHAT KIND of software this is (e.g. CLI tool, web app, API/service, \
+library, game, script, data pipeline, bot) and choose split points that FIT that \
+kind. Do NOT force web-app structure onto everything. Use the SAME language and \
+tech the requirements specify — never introduce a database, web framework, or UI \
+that the user did not ask for.
+
 Rules:
 - Output ONLY a valid JSON array. No markdown fences, no explanation.
 - Each item must have exactly these keys:
     "id":               integer starting at 1
-    "title":            short label, e.g. "Database schema"
+    "title":            short label describing THIS project's part
     "prompt":           A concise, self-contained coding instruction (max 3 sentences).
                         Include only the essential context. Do NOT write long paragraphs.
     "estimated_tokens": integer estimate of total tokens (prompt + expected code output).
-- Aim for 4 to 6 subtasks. Good split points: DB schema, API routes, frontend UI,
-  auth logic, deployment config.
+- Aim for 4 to 6 subtasks. Choose split points APPROPRIATE TO THE PROJECT TYPE, e.g.:
+    • CLI tool     → argument parsing, core logic, file/IO handling, tests, README
+    • Web app      → data model, API routes, frontend UI, auth, deployment config
+    • Library/pkg  → public API, core modules, error handling, tests, packaging
+    • Game         → game loop, entities/state, input handling, rendering, scoring
+    • Script/ETL   → input parsing, transform logic, output/writer, CLI/config
+  These are examples — derive the right split from what the user actually asked for.
 - Scope each subtask to a SINGLE file or one tightly-related pair of files, so its
-  generated code stays focused and complete. If an area is large (e.g. "API routes"
-  or "auth"), split it into separate subtasks rather than bundling many files into one.
+  generated code stays focused and complete. If an area is large, split it further
+  rather than bundling many files into one.
 - Every "prompt" MUST end with this exact instruction: "Keep the implementation
   focused and complete; do not pad with extra examples or boilerplate."
 - Keep every "prompt" field under 100 words.
@@ -137,9 +178,12 @@ Rules:
 
 SUBTASK_SYSTEM = """\
 You are an expert software engineer. Generate ONLY the code for the specific task described. \
+Use the SAME programming language and technology the task specifies — do not switch \
+languages or introduce frameworks/databases the task did not ask for. \
 Be complete and production-ready, but stay focused: implement exactly what the task asks \
 and do NOT pad with extra examples, alternative implementations, or unrelated boilerplate. \
-Use clear file path comments like `// src/app/page.tsx` above each file's code block. \
+Put a file-path comment above each file's code block using that language's comment syntax \
+and a path appropriate to the project (e.g. `# rename_tool/cli.py` or `// src/index.js`). \
 No explanations outside of code comments.\
 """
 
@@ -158,10 +202,10 @@ async def decompose(compressed_requirements: str) -> tuple[list[Subtask], dict]:
         f"{compressed_requirements}"
     )
 
-    raw, decomp_usage = await invoke_claude_sync(
+    raw, decomp_usage = await invoke_sync(
         system=DECOMPOSER_SYSTEM,
         messages=[{"role": "user", "content": prompt}],
-        model_id=HAIKU_MODEL,
+        model_id=LIGHT_MODEL,
         max_tokens=DECOMPOSER_MAX_TOKENS,
     )
 
@@ -204,9 +248,9 @@ def route(subtasks: list[Subtask]) -> list[Subtask]:
     """
     for task in subtasks:
         if task.estimated_tokens <= HAIKU_TOKEN_LIMIT:
-            task.assigned_model = HAIKU_MODEL
+            task.assigned_model = LIGHT_MODEL
         else:
-            task.assigned_model = SONNET_MODEL
+            task.assigned_model = HEAVY_MODEL
     return subtasks
 
 # ---------------------------------------------------------------------------
@@ -225,7 +269,7 @@ async def _execute_subtask(
     await on_progress(task)
 
     try:
-        task.output, usage = await invoke_claude_sync(
+        task.output, usage = await invoke_sync(
             system=SUBTASK_SYSTEM,
             messages=[{"role": "user", "content": task.prompt}],
             model_id=task.assigned_model,
@@ -410,45 +454,45 @@ async def run_task_router(
         ],
     })
 
-    # ── Honest combined savings vs a naive baseline ──────────────────────
-    # Baseline = the naive way: ONE call to the premium model (Sonnet) with the
-    # UNCOMPRESSED prompt, producing the same output volume. We then attribute
-    # the savings to the two levers, and by construction the two attributed
-    # amounts sum exactly to (baseline − actual):
-    #   • Routing lever    — running each subtask on its cheaper assigned model
-    #                        instead of Sonnet, on the same real tokens.
-    #   • Compression lever — sending fewer input tokens (priced at the premium
-    #                        rate, since the baseline would have paid Sonnet for
-    #                        every one of them).
-    sonnet_in, sonnet_out = _usd_prices(SONNET_MODEL)
+    # ── Savings vs the cloud "naive baseline" ────────────────────────────
+    # Baseline = the naive expensive way: ONE call to the premium CLOUD model
+    # with the UNCOMPRESSED prompt, at cloud prices — i.e. what a student/small
+    # team would have paid without this tool. `actual` is what THIS run really
+    # cost: $0 when running locally (Ollama), or the routed cloud cost in
+    # bedrock mode. The gap is the money avoided.
+    #
+    # We also attribute WHERE the saving comes from:
+    #   • Local/routing lever — running on a local (or cheaper) model instead of
+    #                           the premium cloud model, on the same real tokens.
+    #   • Compression lever   — the input tokens we never had to process.
+    prem_in, prem_out = _cloud_equivalent_prices(HEAVY_MODEL)  # premium cloud tier
 
-    # Real input tokens actually sent (compressed), across decomp + subtasks.
     real_in_sent = real_input
-    # If we don't know the uncompressed size, fall back to the sent size so the
-    # compression lever is simply 0 rather than negative.
     uncompressed_in = max(uncompressed_input_tokens, real_in_sent)
 
-    baseline_cost = uncompressed_in * sonnet_in + real_output * sonnet_out
+    baseline_cost = uncompressed_in * prem_in + real_output * prem_out
 
-    # Routing lever: what we'd have paid at Sonnet rates on the SAME real tokens
-    # minus what we actually paid at each subtask's model rate.
-    cost_at_sonnet_same_tokens = real_input * sonnet_in + real_output * sonnet_out
-    routing_saving = cost_at_sonnet_same_tokens - real_total_cost
-    # Compression lever: the input tokens we never sent, valued at Sonnet input.
-    compression_saving = (uncompressed_in - real_in_sent) * sonnet_in
+    # Cloud-equivalent cost of the SAME real tokens on the premium cloud model.
+    cloud_same_tokens = real_input * prem_in + real_output * prem_out
+    # Local/routing lever: premium-cloud cost of those tokens minus what we
+    # actually paid (0 locally, or the routed cloud price in bedrock mode).
+    routing_saving = cloud_same_tokens - real_total_cost
+    # Compression lever: the input tokens we never sent, at premium cloud input.
+    compression_saving = (uncompressed_in - real_in_sent) * prem_in
 
     total_saving = baseline_cost - real_total_cost
     savings_pct = round(total_saving / baseline_cost, 4) if baseline_cost else 0.0
 
     await emit({
         "event": "savings_breakdown",
+        "provider": "local" if is_local() else "bedrock",
         "baselineCostUsd": round(baseline_cost, 6),
         "actualCostUsd": round(real_total_cost, 6),
         "totalSavingUsd": round(total_saving, 6),
         "savingsPct": savings_pct,
         "compressionSavingUsd": round(compression_saving, 6),
         "routingSavingUsd": round(routing_saving, 6),
-        "baselineModel": SONNET_MODEL.split(".")[-1],
+        "baselineModel": HEAVY_MODEL.split(".")[-1],
     })
 
     await emit({"event": "router_done", "subtaskCount": len(completed)})

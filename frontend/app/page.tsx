@@ -44,6 +44,7 @@ interface RealUsage {
 }
 
 interface SavingsBreakdown {
+  provider?: string;
   baselineCostUsd: number;
   actualCostUsd: number;
   totalSavingUsd: number;
@@ -205,10 +206,10 @@ function RealUsagePanel({ usage }: { usage: RealUsage }) {
     <div className="rounded-xl bg-slate-800 border border-teal-600/40 p-4 space-y-3">
       <div className="flex items-center gap-2">
         <h3 className="text-xs font-semibold text-teal-300 uppercase tracking-wide">
-          Real Bedrock Usage
+          Real Local Token Usage
         </h3>
         <span className="rounded-full bg-teal-500/20 px-2 py-0.5 text-[10px] font-medium text-teal-300">
-          billed by AWS · not estimated
+          measured on-device · $0 billed
         </span>
       </div>
 
@@ -218,20 +219,20 @@ function RealUsagePanel({ usage }: { usage: RealUsage }) {
         <StatBadge label="Real Total" value={usage.realTotalTokens.toLocaleString()} />
       </div>
 
-      {/* Real dollar cost — split by input vs output (priced differently) */}
+      {/* Cost — $0 locally; the split shows what dominates the token budget */}
       <div className="rounded-lg bg-slate-900 p-3 space-y-2">
         <div className="flex items-center justify-between">
           <span className="text-[10px] uppercase tracking-wider text-slate-500">
-            Real cost (AWS prices)
+            API cost (local)
           </span>
           <span className="font-mono text-sm font-bold text-teal-300">
-            {fmtUsd(usage.realTotalCostUsd)}
+            {usage.realTotalCostUsd > 0 ? fmtUsd(usage.realTotalCostUsd) : "$0.00"}
           </span>
         </div>
-        {/* proportion bar */}
+        {/* proportion bar — input vs output token share */}
         <div className="flex h-2 w-full overflow-hidden rounded-full bg-slate-700">
-          <div className="bg-sky-500" style={{ width: `${inputPct}%` }} title="input cost" />
-          <div className="bg-amber-500" style={{ width: `${outputPct}%` }} title="output cost" />
+          <div className="bg-sky-500" style={{ width: `${inputPct}%` }} title="input share" />
+          <div className="bg-amber-500" style={{ width: `${outputPct}%` }} title="output share" />
         </div>
         <div className="flex justify-between text-[11px]">
           <span className="text-sky-400">
@@ -244,9 +245,9 @@ function RealUsagePanel({ usage }: { usage: RealUsage }) {
           </span>
         </div>
         <p className="text-[10px] text-slate-500 leading-relaxed">
-          Input compression shrinks the blue slice. Output — the amber slice — is
-          the bulk of the cost, and is minimised by routing to the cheapest
-          capable model rather than by compression.
+          Running locally costs $0 in API fees. Token compression still matters:
+          it shrinks the input the small local model must process, so it runs
+          faster and fits more real work into a limited context window.
         </p>
       </div>
 
@@ -268,9 +269,10 @@ function RealUsagePanel({ usage }: { usage: RealUsage }) {
       )}
 
       <p className="text-[10px] text-slate-500 leading-relaxed">
-        These are the exact input/output token counts AWS Bedrock reported for
-        every model call in this run. The compression report above is a
-        heuristic estimate; this panel is ground truth.
+        These are the exact input/output token counts the local model reported
+        for every call in this run — measured on your machine, nothing billed.
+        The compression report above is a heuristic estimate; this panel is
+        ground truth.
       </p>
     </div>
   );
@@ -281,6 +283,7 @@ function RealUsagePanel({ usage }: { usage: RealUsage }) {
 // levers. This is what makes the pitch defensible — it shows routing does most
 // of the work and compression adds the rest, rather than overclaiming.
 function SavingsBreakdownPanel({ s }: { s: SavingsBreakdown }) {
+  const local = s.provider !== "bedrock";
   const pct = s.totalSavingUsd > 0 ? s.totalSavingUsd : 1;
   const compPct = (s.compressionSavingUsd / pct) * 100;
   const routePct = (s.routingSavingUsd / pct) * 100;
@@ -288,39 +291,49 @@ function SavingsBreakdownPanel({ s }: { s: SavingsBreakdown }) {
     <div className="rounded-xl bg-gradient-to-br from-emerald-900/40 to-slate-800 border border-emerald-500/40 p-4 space-y-3">
       <div className="flex items-center justify-between">
         <h3 className="text-xs font-semibold text-emerald-300 uppercase tracking-wide">
-          Cost Savings vs Naive Baseline
+          {local ? "Cloud Cost Avoided" : "Cost Savings vs Naive Baseline"}
         </h3>
         <span className="font-mono text-2xl font-black text-emerald-400">
-          {(s.savingsPct * 100).toFixed(0)}%
+          {local ? "100%" : `${(s.savingsPct * 100).toFixed(0)}%`}
         </span>
       </div>
 
       <div className="flex items-center justify-between text-xs">
         <div className="flex flex-col">
-          <span className="text-slate-500 text-[10px] uppercase">Naive baseline</span>
+          <span className="text-slate-500 text-[10px] uppercase">
+            {local ? "Same work on cloud" : "Naive baseline"}
+          </span>
           <span className="font-mono text-slate-400 line-through">{fmtUsd(s.baselineCostUsd)}</span>
-          <span className="text-[10px] text-slate-500">1 uncompressed call · {s.baselineModel}</span>
+          <span className="text-[10px] text-slate-500">
+            {local ? `would've cost this on ${s.baselineModel}` : `1 uncompressed call · ${s.baselineModel}`}
+          </span>
         </div>
         <span className="text-emerald-400 text-lg">→</span>
         <div className="flex flex-col items-end">
-          <span className="text-slate-500 text-[10px] uppercase">This pipeline</span>
-          <span className="font-mono text-emerald-300 font-bold">{fmtUsd(s.actualCostUsd)}</span>
-          <span className="text-[10px] text-emerald-500">saved {fmtUsd(s.totalSavingUsd)}</span>
+          <span className="text-slate-500 text-[10px] uppercase">
+            {local ? "Ran locally" : "This pipeline"}
+          </span>
+          <span className="font-mono text-emerald-300 font-bold">
+            {local ? "$0.00" : fmtUsd(s.actualCostUsd)}
+          </span>
+          <span className="text-[10px] text-emerald-500">
+            {local ? "no API tokens billed" : `saved ${fmtUsd(s.totalSavingUsd)}`}
+          </span>
         </div>
       </div>
 
       {/* Two-lever attribution */}
       <div className="space-y-1.5">
         <p className="text-[10px] uppercase tracking-wider text-slate-500">
-          Where the savings come from
+          {local ? "What you avoided paying for" : "Where the savings come from"}
         </p>
         <div className="flex h-2.5 w-full overflow-hidden rounded-full bg-slate-700">
-          <div className="bg-purple-500" style={{ width: `${routePct}%` }} title="model routing" />
+          <div className="bg-purple-500" style={{ width: `${routePct}%` }} title="running locally" />
           <div className="bg-emerald-500" style={{ width: `${compPct}%` }} title="input compression" />
         </div>
         <div className="flex justify-between text-[11px]">
           <span className="text-purple-300">
-            ● Model routing {fmtUsd(s.routingSavingUsd)}{" "}
+            ● {local ? "Local compute" : "Model routing"} {fmtUsd(s.routingSavingUsd)}{" "}
             <span className="text-slate-500">({routePct.toFixed(0)}%)</span>
           </span>
           <span className="text-emerald-300">
@@ -331,10 +344,21 @@ function SavingsBreakdownPanel({ s }: { s: SavingsBreakdown }) {
       </div>
 
       <p className="text-[10px] text-slate-500 leading-relaxed">
-        Baseline = one uncompressed call to {s.baselineModel} (the premium model).
-        Two levers cut the bill: routing each subtask to the cheapest capable
-        model, and compressing the input prompt. The split is honest — routing
-        usually dominates because output tokens carry most of the cost.
+        {local ? (
+          <>
+            You paid <span className="text-emerald-400 font-medium">$0</span> in API fees —
+            everything ran on your own machine. The figure above is what the same
+            work would have cost on {s.baselineModel} in the cloud. Token
+            compression on top means the small local model does more with less.
+          </>
+        ) : (
+          <>
+            Baseline = one uncompressed call to {s.baselineModel} (the premium
+            model). Routing to a cheaper model and compressing the input prompt
+            cut the bill; routing usually dominates because output tokens carry
+            most of the cost.
+          </>
+        )}
       </p>
     </div>
   );
@@ -354,6 +378,7 @@ export default function Home() {
   const [routerStatus, setRouterStatus] = useState<string>("");
   const [subtaskStatuses, setSubtaskStatuses] = useState<Record<number, SubtaskInfo["status"]>>({});
   const [generatedCode, setGeneratedCode] = useState("");
+  const [taskMode, setTaskMode] = useState<"build" | "perform" | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -386,13 +411,14 @@ export default function Home() {
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let accumulated = "";
+      let buffer = "";
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const text = decoder.decode(value);
-        for (const line of text.split("\n")) {
+      // Process ONE complete protocol line. Streamed chunks can split a line
+      // in the middle, so we only ever call this with a full line (see the
+      // buffering below) — otherwise a half-received JSON token would fail to
+      // parse and the rendered text would look jumbled/duplicated.
+      const processLine = (line: string) => {
+        {
           // Text delta
           if (line.startsWith("0:")) {
             try {
@@ -461,8 +487,12 @@ export default function Home() {
                   perSubtask: payload.perSubtask ?? [],
                 });
               }
+              if (payload?.event === "task_mode") {
+                setTaskMode(payload.mode === "perform" ? "perform" : "build");
+              }
               if (payload?.event === "savings_breakdown") {
                 setSavings({
+                  provider: payload.provider,
                   baselineCostUsd: payload.baselineCostUsd,
                   actualCostUsd: payload.actualCostUsd,
                   totalSavingUsd: payload.totalSavingUsd,
@@ -475,7 +505,24 @@ export default function Home() {
             } catch { /* partial */ }
           }
         }
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        // Append the newly decoded text, then process only COMPLETE lines
+        // (everything up to the last newline). Keep the trailing partial line
+        // in `buffer` so it can be completed by the next chunk.
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";   // last element is the incomplete remainder
+        for (const line of lines) {
+          if (line) processLine(line);
+        }
       }
+      // Flush any final complete line left in the buffer.
+      if (buffer.trim()) processLine(buffer);
 
       if (phase === "generate") {
         setGeneratedCode(accumulated);
@@ -515,6 +562,7 @@ export default function Home() {
   const triggerGenerate = async () => {
     setPhase("generate");
     setGeneratedCode("");
+    setTaskMode(null);
     setStats(null);
     setCompressionDiff(null);
     setRealUsage(null);
@@ -525,6 +573,25 @@ export default function Home() {
     await streamFromBackend("generate", messages);
   };
 
+  // Start a fresh session without reloading the page — clears every panel and
+  // returns to the empty elicitation screen.
+  const resetChat = () => {
+    setPhase("elicit");
+    setCanGenerate(false);
+    setMessages([]);
+    setInput("");
+    setIsLoading(false);
+    setStats(null);
+    setCompressionDiff(null);
+    setRealUsage(null);
+    setSavings(null);
+    setRouterPlan(null);
+    setRouterStatus("");
+    setSubtaskStatuses({});
+    setGeneratedCode("");
+    setTaskMode(null);
+  };
+
   return (
     <div className="flex h-screen bg-slate-900 text-slate-100 font-sans overflow-hidden">
 
@@ -533,15 +600,29 @@ export default function Home() {
         <header className="border-b border-slate-700 bg-slate-800 px-5 py-3 shrink-0 space-y-2.5">
           <div className="flex items-center justify-between">
             <div>
-              <h1 className="text-sm font-bold text-indigo-400">🎸 Token Punk Records</h1>
-              <p className="text-xs text-slate-400">Interactive AI FinOps · scopes &amp; compresses before you pay</p>
+              <h1 className="text-sm font-bold text-indigo-400">⚡ TokenQuick</h1>
+              <p className="text-xs text-slate-400">100% local · $0 API cost · token-optimized</p>
             </div>
-            <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium
-              ${phase === "elicit" ? "bg-amber-500/20 text-amber-400" : ""}
-              ${phase === "generate" ? "bg-blue-500/20 text-blue-400" : ""}
-              ${phase === "done" ? "bg-green-500/20 text-green-400" : ""}`}>
-              {phase === "elicit" ? "Pre-Flight Scoping" : phase === "generate" ? "Compressing & Routing…" : "Complete"}
-            </span>
+            <div className="flex items-center gap-2">
+              <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium
+                ${phase === "elicit" ? "bg-amber-500/20 text-amber-400" : ""}
+                ${phase === "generate" ? "bg-blue-500/20 text-blue-400" : ""}
+                ${phase === "done" ? "bg-green-500/20 text-green-400" : ""}`}>
+                {phase === "elicit" ? "Pre-Flight Scoping" : phase === "generate" ? "Compressing & Routing…" : "Complete"}
+              </span>
+              {messages.length > 0 && (
+                <button
+                  onClick={resetChat}
+                  disabled={isLoading}
+                  title="Start a new chat"
+                  className="rounded-full border border-slate-600 px-2.5 py-0.5 text-xs font-medium
+                             text-slate-300 hover:bg-slate-700 hover:text-white
+                             disabled:opacity-40 disabled:cursor-not-allowed transition"
+                >
+                  ↺ New Chat
+                </button>
+              )}
+            </div>
           </div>
           <PipelineIndicator phase={phase} />
         </header>
@@ -553,10 +634,10 @@ export default function Home() {
                 ✈️ Pre-Flight Requirement Scoping
               </p>
               <p className="text-xs text-slate-500 leading-relaxed">
-                Most AI routers forward whatever you type straight to an expensive model.
-                This one pushes back first — it interviews you to lock down exact
-                requirements, so a vague, costly prompt never reaches AWS Bedrock.
-                Describe what you want to build to begin.
+                Everything runs on a local model on your own machine — no cloud,
+                no API bill. The chat first scopes exact requirements, then the
+                prompt is compressed and routed across local models so a small
+                model does more with less. Describe what you want to build to begin.
               </p>
             </div>
           )}
@@ -591,7 +672,7 @@ export default function Home() {
           {canGenerate && phase === "elicit" && (
             <div className="space-y-1.5">
               <p className="text-center text-[11px] text-green-400">
-                ✓ Requirements scoped — safe to hit the paid pipeline
+                ✓ Requirements scoped — ready to build locally
               </p>
               <button
                 onClick={triggerGenerate}
@@ -600,14 +681,14 @@ export default function Home() {
                            py-2.5 text-sm font-semibold text-white shadow-lg hover:opacity-90
                            disabled:opacity-40 transition"
               >
-                ⚡ Compress &amp; Route to Bedrock
+                ⚡ Compress &amp; Build Locally
               </button>
             </div>
           )}
 
           {phase !== "elicit" && (
             <p className="text-center text-xs text-slate-500">
-              {phase === "generate" ? "Compressing payload → routing to cheapest models…" : "✅ Done. See right pane."}
+              {phase === "generate" ? "Compressing → running on local models…" : "✅ Done. See right pane."}
             </p>
           )}
         </div>
@@ -647,7 +728,7 @@ export default function Home() {
             <div className="rounded-xl border border-dashed border-slate-700 bg-slate-800/50 p-8 text-center">
               <p className="text-slate-500 text-sm">
                 Compression stats will appear here after you click{" "}
-                <span className="text-indigo-400 font-medium">⚡ Compress &amp; Route to Bedrock</span>.
+                <span className="text-indigo-400 font-medium">⚡ Compress &amp; Build Locally</span>.
               </p>
             </div>
           )}
@@ -710,7 +791,13 @@ export default function Home() {
           {((isLoading && phase === "generate") || generatedCode) && (
             <div className="rounded-xl bg-slate-800 border border-slate-700 p-4">
               <h3 className="text-xs font-semibold text-green-300 uppercase tracking-wide mb-3 flex items-center gap-2">
-                Generated Code
+                {taskMode === "perform" ? "Result — Research / Notes" : "Generated Code"}
+                {taskMode && (
+                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium normal-case
+                    ${taskMode === "perform" ? "bg-sky-500/20 text-sky-300" : "bg-purple-500/20 text-purple-300"}`}>
+                    {taskMode === "perform" ? "Performed task" : "Built tool"}
+                  </span>
+                )}
                 {isLoading && phase === "generate" && (
                   <span className="h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse" />
                 )}
