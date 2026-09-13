@@ -1,178 +1,194 @@
-# 🎸 Token Punk Records — AI FinOps Router
+# ⚡ TokenQuick — Local AI, Optimized
 
-> *"We compress tokens so you don't have to pay for the ones that don't matter."*
+> *"Capable AI on your own laptop — $0 API cost, tokens optimized so a small model does more."*
 
-A dual-pane web application that intercepts LLM requests, extracts structured requirements from a conversation, applies LLMLingua-2-style token compression, and routes the optimised prompt to AWS Bedrock — slashing input-token costs by 40–60%.
+TokenQuick is a **fully local** AI assistant with a dual-pane web UI. It runs
+open-source models on your own machine via **Ollama** — no cloud, no per-token
+bill — and layers **requirement scoping, token compression, and cost-aware
+model routing** on top so a small local model punches above its weight.
 
----
+It does two things automatically, depending on what you ask:
 
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                        Browser                               │
-│  ┌─────────────────────┐   ┌──────────────────────────────┐  │
-│  │  LEFT — Chat Pane   │   │  RIGHT — Live Preview Pane   │  │
-│  │  useChat → /api/chat│   │  Compression stats + Code    │  │
-│  └─────────┬───────────┘   └──────────────┬───────────────┘  │
-└────────────┼──────────────────────────────┼──────────────────┘
-             │ Vercel AI SDK Data Stream     │ data annotations
-             ▼                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                     FastAPI Backend                          │
-│                                                              │
-│  Phase 1 — Elicitation       (clarifying questions)         │
-│  Phase 2 — Semantic Refactor (history → strict JSON schema)  │
-│  Phase 3 — Token Compression (LLMLingua-2 classifier)        │
-│  Phase 4 — Bedrock Dispatch  (boto3 streaming invoke)        │
-│  Phase 5 — Stream Response   (token deltas → frontend)       │
-└─────────────────────────┬───────────────────────────────────┘
-                          │ boto3
-                          ▼
-              ┌───────────────────────┐
-              │     AWS Bedrock        │
-              │  Claude 3 / Mistral   │
-              └───────────────────────┘
-```
+- **Build** software — a website, CLI tool, API, script, etc. → generates the code.
+- **Perform** a task — research, structured notes, summaries, a poem, analysis →
+  produces the actual result.
 
 ---
 
-## Project Structure
+## Why
+
+Cloud LLMs (GPT-4, Claude) charge per token, and most "cost optimizer" tools
+*still call the expensive cloud model to do the optimizing* — you spend tokens to
+save tokens. For a student or a small team, that bill is a barrier.
+
+TokenQuick's bet: **every engineer has a decent laptop.** Run the model locally
+for free, and optimize the prompt so the small local model goes further.
+
+---
+
+## How it works
+
+```
+┌───────────────────────────── Browser (dual-pane UI) ──────────────────────────┐
+│  LEFT — Chat (Pre-Flight Scoping)        RIGHT — Live report                   │
+│  interviews you to lock requirements     compression • routing • real tokens • │
+│                                          the finished code / notes             │
+└───────────────────────────────────────┬────────────────────────────────────────┘
+                                         │  Vercel AI SDK data-stream protocol
+                                         ▼
+┌──────────────────────────── FastAPI backend ───────────────────────────────────┐
+│  1. Elicitation      — scope requirements (one question at a time)              │
+│  2. Compression      — LLMLingua-2-style token compression (drop filler)        │
+│  3. Intent routing   — BUILD (code pipeline) vs PERFORM (direct answer)         │
+│  4. Decompose+route  — split into subtasks, route to cheapest capable model     │
+│  5. Generate         — stream result; report REAL local token counts            │
+└───────────────────────────────────────┬────────────────────────────────────────┘
+                                         │  local HTTP
+                                         ▼
+                          ┌──────────────────────────────┐
+                          │           Ollama              │
+                          │  llama3.2:3b   (light tier)   │
+                          │  qwen2.5-coder:7b (heavy tier)│
+                          └──────────────────────────────┘
+```
+
+**The three differentiators**
+
+1. **Pre-Flight Scoping** — instead of forwarding a vague prompt, TokenQuick
+   interviews you first so a bad, expensive prompt is never processed.
+2. **Physical token compression** — LLMLingua-2-style extractive compression
+   drops low-signal filler while keeping technical terms; you watch dropped
+   tokens struck through live.
+3. **Cost-aware routing** — work is split into subtasks and routed to the
+   cheapest local model that fits (light `llama3.2:3b` vs heavy `qwen2.5-coder:7b`).
+
+Everything runs locally, so the UI reports **real token counts measured on-device**
+and shows **the cloud cost you avoided** ($0 actually paid).
+
+---
+
+## Project structure
 
 ```
 token-punk-records/
 ├── backend/
-│   ├── main.py              # FastAPI app — CORS, /api/chat endpoint
-│   ├── bedrock_client.py    # boto3 Bedrock streaming integration
-│   ├── compressor.py        # LLMLingua-2-style token compression engine
+│   ├── main.py            # FastAPI app, /api/chat, elicitation + intent routing
+│   ├── llm_provider.py    # provider dispatch: local (default) | bedrock
+│   ├── local_client.py    # Ollama integration + real local token usage
+│   ├── bedrock_client.py  # optional AWS Bedrock fallback
+│   ├── compressor.py      # LLMLingua-2-style token compression engine
+│   ├── task_router.py     # decompose → route → parallel execute → assemble
 │   └── requirements.txt
-├── frontend/
-│   ├── app/
-│   │   ├── layout.tsx
-│   │   ├── page.tsx         # Split-screen UI with useChat + live preview
-│   │   └── globals.css
-│   ├── package.json
-│   ├── tailwind.config.js
-│   ├── postcss.config.js
-│   └── tsconfig.json
-├── .env.example
-├── .gitignore
+├── frontend/              # Next.js + React dual-pane UI
+│   └── app/page.tsx
+├── .env.example           # copy to .env
+├── run.sh                 # one-command setup + run
 └── README.md
 ```
 
 ---
 
-## Setup & Run
+## Setup & run
 
 ### Prerequisites
 
-| Tool | Version |
-|------|---------|
-| Python | ≥ 3.11 |
-| Node.js | ≥ 18 |
-| npm / yarn / pnpm | any recent |
-| AWS account | with Bedrock model access enabled |
+| Tool    | Notes                                           |
+|---------|-------------------------------------------------|
+| Python  | ≥ 3.11                                          |
+| Node.js | ≥ 18                                            |
+| Ollama  | https://ollama.com/download (runs the models)   |
 
-### 1 · Clone & configure
-
-```bash
-git clone <your-repo-url> token-punk-records
-cd token-punk-records
-
-# Copy env template and fill in your credentials
-cp .env.example .env
-```
-
-Edit `.env`:
-
-```dotenv
-AWS_ACCESS_KEY_ID=AKIA...
-AWS_SECRET_ACCESS_KEY=...
-AWS_REGION=us-east-1
-BEDROCK_MODEL_ID=anthropic.claude-3-haiku-20240307-v1:0
-MOCK_MODE=true   # set false to hit real Bedrock
-```
-
-### 2 · Backend
+### 1 · Install Ollama and pull the models
 
 ```bash
-cd backend
+# install Ollama (or use the macOS app from ollama.com)
+curl -fsSL https://ollama.com/install.sh | sh
 
-# Create and activate a virtual environment
-python -m venv .venv
-source .venv/bin/activate      # Windows: .venv\Scripts\activate
+# pull the two local model tiers (~7 GB total, one-time)
+ollama pull llama3.2:3b          # light tier
+ollama pull qwen2.5-coder:7b     # heavy tier
+```
 
-# Install dependencies
+### 2 · Configure
+
+```bash
+cp .env.example .env             # defaults to LLM_PROVIDER=local — no keys needed
+```
+
+### 3 · Run everything (one command)
+
+```bash
+./run.sh
+```
+
+This creates the Python venv, installs deps, installs frontend packages, and
+starts both servers. Then open **http://localhost:3000**.
+
+<details>
+<summary>Manual run (two terminals)</summary>
+
+```bash
+# backend
+cd backend && python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-# Load env vars and start the server
-export $(grep -v '^#' ../.env | xargs)   # macOS/Linux
+set -a; . ../.env; set +a
 uvicorn main:app --reload --port 8000
+
+# frontend
+cd frontend && npm install && npm run dev
 ```
-
-The API is now live at http://localhost:8000  
-Swagger UI: http://localhost:8000/docs
-
-### 3 · Frontend
-
-```bash
-cd frontend
-
-npm install        # or: yarn / pnpm install
-npm run dev
-```
-
-Open http://localhost:3000
+</details>
 
 ---
 
-## How it works — step by step
+## Using it
 
-1. **Elicitation** — The chatbot asks up to 6 clarifying questions (app type, colours, database, features, deployment, confirmation).
-2. **Semantic Refactor** — Once all questions are answered, click **⚡ Compress & Generate Code**. The backend assembles a strict JSON schema from the conversation history.
-3. **Token Compression** — `compressor.py` tokenises the JSON and scores every token using a bidirectional heuristic (stand-in for an XLM-RoBERTa-large classifier). Tokens scoring below the `preserve_ratio` threshold are discarded. Typical savings: **40–60%**.
-4. **Bedrock Dispatch** — The compressed prompt is sent to AWS Bedrock via `bedrock_client.py` using `invoke_model_with_response_stream`.
-5. **Streaming Response** — Token deltas are forwarded to the frontend using the **Vercel AI SDK Data Stream Protocol** (prefix `0:` for text, `2:` for data annotations, `d:` for finish). The right-hand preview pane renders them live.
-
----
-
-## Switching to real AWS Bedrock
-
-1. Set `MOCK_MODE=false` in `.env`.
-2. Ensure your IAM user/role has the `bedrock:InvokeModelWithResponseStream` permission.
-3. Enable the target model in the AWS Bedrock console (Model Access → Request access).
-4. Restart the backend.
-
-### Supported models
-
-| Model ID | Notes |
-|----------|-------|
-| `anthropic.claude-3-haiku-20240307-v1:0` | Cheapest, fastest ✅ recommended |
-| `anthropic.claude-3-sonnet-20240229-v1:0` | Balanced quality/cost |
-| `anthropic.claude-3-opus-20240229-v1:0` | Highest quality |
-| `mistral.mistral-large-2402-v1:0` | Alternative provider |
+1. **Chat (left pane).** Say what you want — *"a CLI tool to rename files"* or
+   *"research RAG and give me structured notes"*. It asks a couple of clarifying
+   questions.
+2. When it has enough, **⚡ Compress & Build Locally** appears (or say *"just do it"*).
+3. **Right pane** shows the pipeline: the compression before/after diff, the model
+   routing, **real local token usage**, cloud-cost-avoided, and the finished
+   output — **code** (build) or **notes/text** (perform).
 
 ---
 
-## Upgrading the compression engine
+## Configuration (`.env`)
 
-`compressor.py` uses a heuristic scorer as a stand-in. To use a real model:
+| Variable              | Default                        | Purpose                             |
+|-----------------------|--------------------------------|-------------------------------------|
+| `LLM_PROVIDER`        | `local`                        | `local` (Ollama) or `bedrock`       |
+| `OLLAMA_HOST`         | `http://localhost:11434`       | Ollama endpoint                     |
+| `ROUTER_MODEL_LIGHT`  | `llama3.2:3b`                  | light/fast tier                     |
+| `ROUTER_MODEL_HEAVY`  | `qwen2.5-coder:7b`             | heavy/capable tier                  |
+| `SUBTASK_MAX_TOKENS`  | `8192`                         | max output tokens per subtask       |
 
-```python
-# In compressor.py, replace _score_token with a model forward pass:
-from transformers import AutoTokenizer, AutoModelForTokenClassification
-import torch
+AWS Bedrock is available as an optional fallback (`LLM_PROVIDER=bedrock` + AWS keys).
 
-tokenizer = AutoTokenizer.from_pretrained("microsoft/llmlingua-2-xlm-roberta-large-meetingbank")
-model = AutoModelForTokenClassification.from_pretrained(...)
+---
 
-def _score_token(token_text, index, total):
-    # Run inference and return softmax probability for PRESERVE class
-    ...
-```
+## Tech stack
+
+Next.js + React (frontend) · FastAPI + Python (backend) · Ollama running
+Llama 3.2 3B and Qwen 2.5 Coder 7B locally · streaming over the Vercel AI SDK
+data-stream protocol.
+
+---
+
+## Honest notes
+
+- **Compression is a heuristic** classifier inspired by LLMLingua-2 (token scoring
+  + threshold), a stand-in for the paper's fine-tuned XLM-RoBERTa model; the
+  "Real Local Token Usage" panel shows ground-truth counts from the model itself.
+- **Local models are smaller than frontier cloud models** and can't browse the web,
+  so "perform" tasks answer from the model's own knowledge (it's told to flag
+  uncertainty rather than invent facts). The win is *free, private, offline, and
+  good enough for a huge range of tasks* — not beating GPT-4 on raw quality.
+- The bigger cost lever is **running locally at $0** vs. the cloud; input
+  compression is a smaller, honestly-reported lever.
 
 ---
 
 ## License
 
-MIT — build freely, compress aggressively, pay less.
+MIT — build freely, run locally, pay nothing.
