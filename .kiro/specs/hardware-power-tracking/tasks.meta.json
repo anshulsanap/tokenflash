@@ -1,0 +1,194 @@
+{
+  "pbtResults": {},
+  "executionHistory": {
+    "1. Add the `psutil` runtime dependency for the estimated tier": [
+      {
+        "executionId": "59b8faab-919b-4efd-855f-bbdd5087240c",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789615381544
+      },
+      {
+        "executionId": "59b8faab-919b-4efd-855f-bbdd5087240c",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789615384413
+      }
+    ],
+    "7. Checkpoint - backend core complete": [
+      {
+        "executionId": "fe2a1fb6-450f-46d2-a646-fe99d90c06ec",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789615599156
+      },
+      {
+        "executionId": "fe2a1fb6-450f-46d2-a646-fe99d90c06ec",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789615602069
+      }
+    ],
+    "8.1 Extend `lifespan` to detect the source and manage the sampler": [
+      {
+        "executionId": "fe2a1fb6-450f-46d2-a646-fe99d90c06ec",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789615616686
+      },
+      {
+        "executionId": "fe2a1fb6-450f-46d2-a646-fe99d90c06ec",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789616039725
+      }
+    ],
+    "8.2 Add the `power_report` / `power_benchmark_unavailable` frame builders": [
+      {
+        "executionId": "fe2a1fb6-450f-46d2-a646-fe99d90c06ec",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789615618074
+      },
+      {
+        "executionId": "fe2a1fb6-450f-46d2-a646-fe99d90c06ec",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789616040623
+      }
+    ],
+    "8.3 Snapshot the toggle and add the `_attribute_power` helper": [
+      {
+        "executionId": "fe2a1fb6-450f-46d2-a646-fe99d90c06ec",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789615619027
+      },
+      {
+        "executionId": "fe2a1fb6-450f-46d2-a646-fe99d90c06ec",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789616042052
+      }
+    ],
+    "8.4 Bracket the inference window on the PERFORM and BUILD paths": [
+      {
+        "executionId": "fe2a1fb6-450f-46d2-a646-fe99d90c06ec",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789615620475
+      },
+      {
+        "executionId": "fe2a1fb6-450f-46d2-a646-fe99d90c06ec",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789616043467
+      }
+    ],
+    "8.5 Emit exactly one `power_report` before finish on every path (incl. cache hit)": [
+      {
+        "executionId": "fe2a1fb6-450f-46d2-a646-fe99d90c06ec",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789615621683
+      },
+      {
+        "executionId": "fe2a1fb6-450f-46d2-a646-fe99d90c06ec",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789616044334
+      }
+    ],
+    "8. Wire the stage into `backend/main.py` (lifespan, attribution, `power_report`)": [
+      {
+        "executionId": "fe2a1fb6-450f-46d2-a646-fe99d90c06ec",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789616044359
+      }
+    ],
+    "9. Checkpoint - backend wiring complete": [
+      {
+        "executionId": "71db0efb-ec8a-4157-84b3-09dcd3af2e1d",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789616307878
+      },
+      {
+        "executionId": "71db0efb-ec8a-4157-84b3-09dcd3af2e1d",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789616318960
+      }
+    ],
+    "10.1 Add the toggle endpoints": [
+      {
+        "executionId": "71db0efb-ec8a-4157-84b3-09dcd3af2e1d",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789616309256
+      },
+      {
+        "executionId": "71db0efb-ec8a-4157-84b3-09dcd3af2e1d",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789616594325
+      }
+    ],
+    "10.2 Add the read-only current-reading endpoint": [
+      {
+        "executionId": "71db0efb-ec8a-4157-84b3-09dcd3af2e1d",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789616310156
+      },
+      {
+        "executionId": "71db0efb-ec8a-4157-84b3-09dcd3af2e1d",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789616595230
+      }
+    ],
+    "11.1 Create `frontend/components/PowerReport.tsx`": [
+      {
+        "executionId": "71db0efb-ec8a-4157-84b3-09dcd3af2e1d",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789616311557
+      },
+      {
+        "executionId": "71db0efb-ec8a-4157-84b3-09dcd3af2e1d",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789616596562
+      }
+    ],
+    "11.2 Wire `power_report` handling into `frontend/app/page.tsx`": [
+      {
+        "executionId": "71db0efb-ec8a-4157-84b3-09dcd3af2e1d",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789616313016
+      },
+      {
+        "executionId": "71db0efb-ec8a-4157-84b3-09dcd3af2e1d",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789616597578
+      }
+    ],
+    "11.3 Add the Power Telemetry toggle row to `RedactionSettings.tsx`": [
+      {
+        "executionId": "71db0efb-ec8a-4157-84b3-09dcd3af2e1d",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789616313896
+      },
+      {
+        "executionId": "71db0efb-ec8a-4157-84b3-09dcd3af2e1d",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789616598929
+      }
+    ],
+    "12. Document the optional measured tier in the README": [
+      {
+        "executionId": "71db0efb-ec8a-4157-84b3-09dcd3af2e1d",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789616315003
+      },
+      {
+        "executionId": "71db0efb-ec8a-4157-84b3-09dcd3af2e1d",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789616599815
+      }
+    ],
+    "10. Add the `/api/power/*` FastAPI endpoints": [
+      {
+        "executionId": "71db0efb-ec8a-4157-84b3-09dcd3af2e1d",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789616595258
+      }
+    ],
+    "11. Frontend: the Power / Energy panel and wiring": [
+      {
+        "executionId": "71db0efb-ec8a-4157-84b3-09dcd3af2e1d",
+        "chatSessionId": "sess_6a31ce9b-18f5-48a1-9437-a10575d55106",
+        "timestamp": 1789616598953
+      }
+    ]
+  }
+}

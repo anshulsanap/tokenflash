@@ -28,6 +28,14 @@ import string
 from dataclasses import dataclass, field
 from typing import Callable
 
+# Single source of truth for the Redaction_Placeholder pattern. Imported from
+# redactor so the compressor and the redaction stage agree on exactly one
+# format. redactor.py does not import compressor, so there is no circular
+# import. PLACEHOLDER_RE matches ⟦REDACTED_<CATEGORY>⟧ (U+27E6/U+27E7
+# delimiters), which contains none of JSON_STRUCTURAL, the double-quote, or
+# whitespace — so a placeholder always tokenizes as one atomic bare word.
+from redactor import PLACEHOLDER_RE
+
 # ---------------------------------------------------------------------------
 # Token dataclass
 # ---------------------------------------------------------------------------
@@ -341,9 +349,19 @@ def _score_and_tag_tokens(
     # Tag each token — always keep structural JSON tokens and string-delimiter
     # quotes regardless of threshold, so the JSON skeleton never breaks (a
     # dropped quote turns valid '"key":"val"' into mangled 'key:val').
+    #
+    # Redaction placeholders are also force-preserved regardless of heuristic
+    # score: any token whose text fully matches PLACEHOLDER_RE is a
+    # ⟦REDACTED_X⟧ token and MUST NOT be discarded (Req 11.2). Because the
+    # placeholder delimiters are not whitespace and not JSON_STRUCTURAL/quote,
+    # _tokenize already emits each placeholder as a single atomic bare word, so
+    # this guard cannot split or merge it — it only prevents a low score from
+    # dropping it.
     for tk in tokens:
+        is_placeholder = PLACEHOLDER_RE.fullmatch(tk.text) is not None
         tk.preserve = (
-            (tk.score >= threshold)
+            is_placeholder
+            or (tk.score >= threshold)
             or (tk.text in JSON_STRUCTURAL)
             or (tk.text == '"')
         )

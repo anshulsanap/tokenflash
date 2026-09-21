@@ -15,3 +15,49 @@ httpx==0.28.1
 
 # Typing backports (Python < 3.12)
 typing-extensions==4.14.1
+
+# Pre-inference redaction — local NER (nothing leaves the machine at runtime)
+# spaCy runs entirely on-device; the model is loaded from a local artifact at
+# request time with no network call. The en_core_web_sm wheel below is pinned
+# and fetched at install time only (not at request time). Pinned to the
+# spaCy 3.8.x line, which ships cp313 wheels and is compatible with Python 3.13
+# (the 3.7.x line predates 3.13 and fails to build from source on 3.13/3.14).
+# en_core_web_sm 3.8.0 is the matching model release for spaCy 3.8.x.
+spacy==3.8.7
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+
+# Testing
+pytest==8.3.3
+hypothesis==6.112.1
+
+# Hardened semantic cache — local embedding + vector store (nothing leaves the
+# machine at runtime). sentence-transformers embeds prompts on-device (CPU-only)
+# and ChromaDB is a local persistent vector store; both are installed/warmed at
+# build time only and make no network call at request time. The all-MiniLM-L6-v2
+# model artifact resolves from the local sentence-transformers / HF cache at
+# runtime (fetched once at install/warm time, mirroring the en_core_web_sm note).
+# Pinned to Python 3.13-compatible releases (cp313 wheels).
+sentence-transformers==3.3.1
+chromadb==1.5.9
+
+# Hardware power tracking — on-device utilization sampling for the ESTIMATED tier
+# (nothing leaves the machine at runtime). psutil reads CPU utilization locally
+# (no network); estimated wattage = psutil.cpu_percent() × a configurable TDP
+# model. On macOS psutil NEVER reports true wattage — it powers the ESTIMATED
+# tier only. The MEASURED tier comes from the system `powermetrics` binary via a
+# non-interactive probe gated behind POWER_TRY_MEASURED=1 (no Python dependency).
+# Pinned to a Python 3.13-compatible (cp313) release.
+psutil==6.1.0
+
+# OpenTelemetry distributed tracing (feature: opentelemetry-tracing)
+# Additive trace spans over the existing telemetry. Tracing defaults to a local,
+# append-only JSONL file exporter (backend/logs/traces.jsonl) with ZERO outbound
+# calls. The OTLP-over-HTTP exporter is used ONLY when TOKENQUICK_OTEL_EGRESS=true
+# AND OTEL_EXPORTER_OTLP_ENDPOINT is set (the single Sanctioned_Egress) — it is
+# lazily imported behind that gate, so the local-first zero-network default has
+# no runtime dependency on the transport package. Pinned to 1.44.0 to match the
+# version already present in the resolved tree (chromadb transitively depends on
+# opentelemetry-*), avoiding a version conflict. cp313-compatible.
+opentelemetry-api==1.44.0
+opentelemetry-sdk==1.44.0
+opentelemetry-exporter-otlp-proto-http==1.44.0

@@ -23,3 +23,14 @@ Thumbs.db
 
 # TS build cache
 frontend/tsconfig.tsbuildinfo
+
+# Runtime telemetry logs — append-only JSONL (redaction audit, cache decisions,
+# power log, OTEL traces). Never track runtime telemetry; keep the dir via .gitkeep.
+*.jsonl
+backend/logs/*.jsonl
+!backend/logs/.gitkeep
+
+# Machine-local caches / data stores — never version these
+.hypothesis/
+backend/.hypothesis/
+backend/cache_store/

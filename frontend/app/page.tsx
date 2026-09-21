@@ -2,6 +2,21 @@
 
 import { Message } from "ai/react";
 import { useEffect, useRef, useState } from "react";
+import { StatBadge } from "../components/StatBadge";
+import {
+  RedactionReport,
+  RedactionReportData,
+  RedactionBenchmarkData,
+} from "../components/RedactionReport";
+import { RedactionSettings } from "../components/RedactionSettings";
+import {
+  CacheReport,
+  CacheReportData,
+  CacheBenchmarkData,
+} from "../components/CacheReport";
+import { PowerReport, PowerReportData } from "../components/PowerReport";
+import { ArtifactPreview } from "../components/ArtifactPreview";
+import { ArtifactStreamParser, ParseResult } from "../lib/artifactParser";
 
 interface CompressionStats {
   originalTokens: number;
@@ -9,6 +24,9 @@ interface CompressionStats {
   ratio: number;
   multiplier: number;
   compressedPrompt: string;
+  // Set true when compression was skipped because the result was served from
+  // the semantic cache (Req 9.6). All numeric fields are still present (zeros).
+  skipped?: boolean;
 }
 
 interface DiffToken {
@@ -81,15 +99,6 @@ function ChatBubble({ msg }: { msg: Message }) {
         ${isUser ? "bg-indigo-600 text-white rounded-br-sm" : "bg-slate-700 text-slate-100 rounded-bl-sm"}`}>
         {display}
       </div>
-    </div>
-  );
-}
-
-function StatBadge({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div className="flex flex-col items-center rounded-lg bg-slate-700 px-4 py-2">
-      <span className="text-xs text-slate-400 uppercase tracking-wider">{label}</span>
-      <span className="mt-1 text-lg font-mono font-bold text-indigo-400">{value}</span>
     </div>
   );
 }
@@ -379,6 +388,24 @@ export default function Home() {
   const [subtaskStatuses, setSubtaskStatuses] = useState<Record<number, SubtaskInfo["status"]>>({});
   const [generatedCode, setGeneratedCode] = useState("");
   const [taskMode, setTaskMode] = useState<"build" | "perform" | null>(null);
+
+  // Stable session id, generated ONCE per chat session. The backend rejects
+  // generate requests without one and uses it to accumulate per-session
+  // redaction counts. Regenerated only by resetChat().
+  const [sessionId, setSessionId] = useState(() => crypto.randomUUID());
+  const [redactionReport, setRedactionReport] = useState<RedactionReportData | null>(null);
+  const [redactionBenchmark, setRedactionBenchmark] = useState<RedactionBenchmarkData | null>(null);
+  const [redactionError, setRedactionError] = useState<string | null>(null);
+  const [cacheReport, setCacheReport] = useState<CacheReportData | null>(null);
+  const [cacheBenchmark, setCacheBenchmark] = useState<CacheBenchmarkData | null>(null);
+  const [powerReport, setPowerReport] = useState<PowerReportData | null>(null);
+  // Live artifact preview (private-on-device-artifacts stage). `artifactReport`
+  // is the parser snapshot; `artifactStreamEnded` lets the component apply the
+  // stream-end-while-open fallback (Req 7.4).
+  const [artifactReport, setArtifactReport] = useState<ParseResult | null>(null);
+  const [artifactStreamEnded, setArtifactStreamEnded] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -388,6 +415,18 @@ export default function Home() {
   // Core streaming fetch — works for both elicit and generate phases
   const streamFromBackend = async (phase: AppPhase, msgs: Message[]) => {
     setIsLoading(true);
+
+    // ONE parser per generation. Artifacts arrive as plain `0:` text and carry
+    // no sessionId of their own, so the session guard here is structural: this
+    // parser is local to this streamFromBackend invocation and only active for
+    // phase === "generate", so a stale generation's parser is discarded when a
+    // new generate starts (Req 6.4). Only the generate phase parses artifacts.
+    const parser = new ArtifactStreamParser();
+    if (phase === "generate") {
+      // Clear the previous preview before the first token of a re-generate.
+      setArtifactReport(null);
+      setArtifactStreamEnded(false);
+    }
 
     // Optimistically add a placeholder assistant message we'll fill in
     const assistantId = `a-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -402,6 +441,7 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           phase,
+          sessionId,
           messages: msgs.map((m) => ({ role: m.role, content: m.content })),
         }),
       });
@@ -429,6 +469,10 @@ export default function Home() {
                   m.id === assistantId ? { ...m, content: accumulated } : m
                 )
               );
+              // Feed the SAME decoded generate-phase text delta into the
+              // artifact parser (a pure call). Only `0:` text — never `2:`
+              // annotation frames, and never during the elicit phase.
+              if (phase === "generate") setArtifactReport(parser.push(token));
             } catch { /* partial */ }
           }
           // Data annotation
@@ -443,6 +487,7 @@ export default function Home() {
                   ratio: payload.ratio,
                   multiplier: payload.multiplier ?? 1,
                   compressedPrompt: payload.compressedPrompt,
+                  skipped: payload.skipped ?? false,
                 });
               }
               if (payload?.event === "compression_diff") {
@@ -489,6 +534,13 @@ export default function Home() {
               }
               if (payload?.event === "task_mode") {
                 setTaskMode(payload.mode === "perform" ? "perform" : "build");
+                // Gate the parser's fence fallback synchronously. The backend
+                // emits this annotation BEFORE any `0:` text delta, and this
+                // ordered loop processes it first, so the parser is in the
+                // correct mode before it sees any fence. We cannot rely on the
+                // async React `taskMode` state here — it won't be updated in
+                // time within the same stream tick.
+                parser.setBuildMode(payload.mode !== "perform");
               }
               if (payload?.event === "savings_breakdown") {
                 setSavings({
@@ -501,6 +553,82 @@ export default function Home() {
                   routingSavingUsd: payload.routingSavingUsd,
                   baselineModel: payload.baselineModel,
                 });
+              }
+              // Redaction report — only apply when the annotation's session id
+              // matches the current session (Req 7.5: ignore mismatches).
+              if (payload?.event === "redaction_report" && payload.sessionId === sessionId) {
+                setRedactionReport({
+                  stageEnabled: Boolean(payload.stageEnabled),
+                  counts: payload.counts ?? {},
+                  totalRedactions: payload.totalRedactions ?? 0,
+                });
+              }
+              if (payload?.event === "redaction_benchmark" && payload.sessionId === sessionId) {
+                setRedactionBenchmark({
+                  stageEnabled: Boolean(payload.stageEnabled),
+                  latencyMs: payload.latencyMs ?? 0,
+                  charsRedacted: payload.charsRedacted ?? 0,
+                  perCategoryCounts: payload.perCategoryCounts ?? {},
+                });
+              }
+              // Redaction failed — surface a banner and clear the panels so no
+              // stale/partial report is shown.
+              if (payload?.event === "redaction_failure") {
+                setRedactionError(`Redaction failed: ${payload.reason}`);
+                setRedactionReport(null);
+                setRedactionBenchmark(null);
+              }
+              // Cache report — session-guarded (Req 7.8): only apply when the
+              // annotation's session id matches the current session.
+              if (payload?.event === "cache_report" && payload.sessionId === sessionId) {
+                setCacheReport({
+                  stageEnabled: Boolean(payload.stageEnabled),
+                  hit: Boolean(payload.hit),
+                  hits: payload.hits ?? 0,
+                  misses: payload.misses ?? 0,
+                  decisions: payload.decisions ?? 0,
+                  hitRate: payload.hitRate ?? 0,
+                  tokensSavedFromCache: payload.tokensSavedFromCache ?? 0,
+                  computeTimeSavedMs: payload.computeTimeSavedMs ?? 0,
+                  tokensSavedThisHit: payload.tokensSavedThisHit ?? 0,
+                  computeTimeSavedMsThisHit: payload.computeTimeSavedMsThisHit ?? 0,
+                });
+              }
+              if (payload?.event === "cache_benchmark" && payload.sessionId === sessionId) {
+                setCacheBenchmark({
+                  decision: payload.decision === "hit" ? "hit" : "miss",
+                  lookupLatencyMs: payload.lookupLatencyMs ?? 0,
+                  tokensSaved: payload.tokensSaved ?? 0,
+                  inferenceTimeSavedMs: payload.inferenceTimeSavedMs ?? 0,
+                });
+              }
+              // Benchmark capture failed — clear the benchmark, keep the report
+              // (Req 10.7). Session-guarded like the others.
+              if (payload?.event === "cache_benchmark_unavailable" && payload.sessionId === sessionId) {
+                setCacheBenchmark(null);
+              }
+              // Power report — session-guarded (Req 6.4): only apply when the
+              // annotation's session id matches the current session. Use
+              // `?? null` (NOT `?? 0`) so an unavailable numeric figure stays
+              // null and never becomes a fabricated 0 (Req 6.6).
+              if (payload?.event === "power_report" && payload.sessionId === sessionId) {
+                setPowerReport({
+                  stageEnabled: Boolean(payload.stageEnabled),
+                  quality: payload.quality ?? "unavailable",
+                  source: payload.source ?? "",
+                  avgPowerWatts: payload.avgPowerWatts ?? null,
+                  energyJoules: payload.energyJoules ?? null,
+                  cpuWatts: payload.cpuWatts ?? null,
+                  gpuWatts: payload.gpuWatts ?? null,
+                  packageWatts: payload.packageWatts ?? null,
+                  sampleCount: payload.sampleCount ?? 0,
+                  durationSeconds: payload.durationSeconds ?? 0,
+                });
+              }
+              // Power benchmark capture failed — clear the power report
+              // (Req 6.4). Session-guarded like the others.
+              if (payload?.event === "power_benchmark_unavailable" && payload.sessionId === sessionId) {
+                setPowerReport(null);
               }
             } catch { /* partial */ }
           }
@@ -526,6 +654,10 @@ export default function Home() {
 
       if (phase === "generate") {
         setGeneratedCode(accumulated);
+        // Stream closed: finalize the parser so the component can apply the
+        // stream-end-while-open fallback (Req 7.4).
+        setArtifactReport(parser.onStreamEnd());
+        setArtifactStreamEnded(true);
         setPhase("done");
       }
     } catch (err) {
@@ -570,6 +702,14 @@ export default function Home() {
     setRouterPlan(null);
     setRouterStatus("");
     setSubtaskStatuses({});
+    setRedactionReport(null);
+    setRedactionBenchmark(null);
+    setRedactionError(null);
+    setCacheReport(null);
+    setCacheBenchmark(null);
+    setPowerReport(null);
+    setArtifactReport(null);
+    setArtifactStreamEnded(false);
     await streamFromBackend("generate", messages);
   };
 
@@ -590,6 +730,16 @@ export default function Home() {
     setSubtaskStatuses({});
     setGeneratedCode("");
     setTaskMode(null);
+    // Fresh session — new stable id and cleared redaction panels.
+    setSessionId(crypto.randomUUID());
+    setRedactionReport(null);
+    setRedactionBenchmark(null);
+    setRedactionError(null);
+    setCacheReport(null);
+    setCacheBenchmark(null);
+    setPowerReport(null);
+    setArtifactReport(null);
+    setArtifactStreamEnded(false);
   };
 
   return (
@@ -696,21 +846,41 @@ export default function Home() {
 
       {/* RIGHT PANE */}
       <section className="flex w-1/2 flex-col">
-        <header className="border-b border-slate-700 bg-slate-800 px-5 py-3 shrink-0">
-          <h2 className="text-sm font-bold text-purple-400">Live Preview</h2>
-          <p className="text-xs text-slate-400">Compression stats &amp; generated output</p>
+        <header className="border-b border-slate-700 bg-slate-800 px-5 py-3 shrink-0 flex items-center justify-between">
+          <div>
+            <h2 className="text-sm font-bold text-purple-400">Live Preview</h2>
+            <p className="text-xs text-slate-400">Compression stats &amp; generated output</p>
+          </div>
+          <button
+            onClick={() => setShowSettings((s) => !s)}
+            title="Redaction settings"
+            className={`rounded-full border px-2.5 py-0.5 text-xs font-medium transition
+              ${showSettings
+                ? "border-rose-500/50 bg-rose-500/15 text-rose-300"
+                : "border-slate-600 text-slate-300 hover:bg-slate-700 hover:text-white"}`}
+          >
+            ⚙ Redaction Settings
+          </button>
         </header>
 
         <div className="flex-1 overflow-y-auto p-5 space-y-5">
+          {showSettings && <RedactionSettings />}
+
           {stats ? (
             <div className="rounded-xl bg-slate-800 border border-slate-700 p-4 space-y-4">
               <div className="flex items-center justify-between">
                 <h3 className="text-xs font-semibold text-purple-300 uppercase tracking-wide">
                   Token Compression Report
                 </h3>
-                <span className="rounded-full bg-emerald-500/20 px-2.5 py-0.5 text-xs font-mono font-bold text-emerald-400">
-                  {stats.multiplier.toFixed(1)}× smaller
-                </span>
+                {stats.skipped ? (
+                  <span className="rounded-full bg-sky-500/20 px-2.5 py-0.5 text-xs font-medium text-sky-300">
+                    skipped — served from cache
+                  </span>
+                ) : (
+                  <span className="rounded-full bg-emerald-500/20 px-2.5 py-0.5 text-xs font-mono font-bold text-emerald-400">
+                    {stats.multiplier.toFixed(1)}× smaller
+                  </span>
+                )}
               </div>
               <div className="flex gap-3 flex-wrap">
                 <StatBadge label="Original Tokens" value={stats.originalTokens} />
@@ -732,6 +902,28 @@ export default function Home() {
               </p>
             </div>
           )}
+
+          {/* Redaction — shown first (it runs before compression). Error
+              banner sits above the report panel. */}
+          {redactionError && (
+            <div className="rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3">
+              <p className="text-sm text-red-300">{redactionError}</p>
+            </div>
+          )}
+          <RedactionReport report={redactionReport} benchmark={redactionBenchmark} />
+
+          {/* Semantic cache — runs after redaction, before compression. Its
+              savings are presented separately from the compression report. */}
+          <CacheReport report={cacheReport} benchmark={cacheBenchmark} />
+
+          {/* Power / Energy — the hardware power figures attributed to the
+              generate request, rendered after the cache report. */}
+          <PowerReport report={powerReport} />
+
+          {/* Live artifact preview — the CLOSED primary artifact rendered in a
+              network-restricted Sandpack sandbox, rendered after the power
+              report. Passed through as-is; the component handles null/empty. */}
+          <ArtifactPreview report={artifactReport} streamEnded={artifactStreamEnded} />
 
           {/* Before/After compression diff — the interactive differentiator */}
           {compressionDiff && compressionDiff.tokens.length > 0 && (

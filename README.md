@@ -162,8 +162,101 @@ cd frontend && npm install && npm run dev
 | `ROUTER_MODEL_LIGHT`  | `llama3.2:3b`                  | light/fast tier                     |
 | `ROUTER_MODEL_HEAVY`  | `qwen2.5-coder:7b`             | heavy/capable tier                  |
 | `SUBTASK_MAX_TOKENS`  | `8192`                         | max output tokens per subtask       |
+| `TOKENQUICK_OTEL_EGRESS` | `false`                     | opt-in gate for OTLP trace export (the one outbound path) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | *(unset)*              | OTLP-over-HTTP traces endpoint, used only when the gate is on |
 
 AWS Bedrock is available as an optional fallback (`LLM_PROVIDER=bedrock` + AWS keys).
+
+---
+
+## Power / Energy telemetry (optional measured tier)
+
+TokenQuick can attribute a per-request **average power (W)** and **energy (J)**
+figure to each generation and stream it to the dashboard's Power / Energy panel.
+By default it uses an **`estimated`** tier — `psutil` reads CPU utilization
+locally (no network) and multiplies it by a TDP model. Every figure is tagged
+`measured | estimated | unavailable`, so an estimate is never presented as a
+measurement.
+
+On Apple Silicon the true **`measured`** tier comes from the system
+`powermetrics` binary, which requires root. TokenQuick **never** writes sudoers,
+never invokes `sudo` interactively, and never prompts for a password during a
+request. It only **detects** the measured tier via a gated, non-interactive
+probe: it runs the probe *only* when you start the backend with
+`POWER_TRY_MEASURED=1`, and even then uses `sudo -n` (non-interactive), which
+fails closed if passwordless sudo is not configured. With the flag unset (the
+default) the backend never invokes `sudo` at all and goes straight to the
+`estimated` tier.
+
+### Unlocking the measured tier (one-time, out-of-band operator opt-in)
+
+To enable the `measured` tier, grant the backend's user passwordless `sudo` for
+**only** the `powermetrics` binary. Create the snippet with
+`sudo visudo -f /etc/sudoers.d/tokenquick-powermetrics` and add a single line
+scoped to the exact binary path and one named user (replace `<youruser>`):
+
+```
+<youruser> ALL=(root) NOPASSWD: /usr/bin/powermetrics
+```
+
+> ⚠️ **This grants passwordless execution of `/usr/bin/powermetrics` only — not
+> general `sudo`.** Scoping the `NOPASSWD` rule to that exact binary path (and a
+> single user) matters because it limits blast radius: a blanket
+> `NOPASSWD: ALL` would hand the account passwordless root for *every* command,
+> whereas this rule authorizes just the one power-telemetry binary. Keep the
+> scope this tight — never widen it to `ALL`.
+
+The backend invokes `powermetrics --samplers cpu_power -n 1 -i 200`; the
+`/usr/bin/powermetrics` scoping above covers that invocation. Once the snippet
+is in place, the next backend startup (with `POWER_TRY_MEASURED=1`) runs the
+probe, finds `sudo -n powermetrics` succeeds within its timeout, and selects the
+`powermetrics` source at the `measured` tier.
+
+**Security caveat:** even the `measured` tier requires this explicit,
+out-of-band operator action. TokenQuick never creates or modifies the sudoers
+file, never prompts, and defaults to the `estimated` tier via `psutil` when the
+snippet is absent. Power telemetry is independently toggleable (Power Telemetry
+switch in the settings panel) like the other pipeline stages.
+
+---
+
+## Distributed tracing (OpenTelemetry)
+
+TokenQuick emits standard **OpenTelemetry trace spans** for the generate
+pipeline. Every `/api/chat` generate request produces one parent
+`tokenquick.generate` span with child spans for each stage: **redaction**,
+**cache lookup**, **compression**, **inference**, and **power attribution**.
+
+By default this makes **zero outbound network calls** — consistent with
+TokenQuick's 100%-local, $0, deny-outbound identity. Spans are written to a
+**local, append-only JSONL file** at `backend/logs/traces.jsonl` (the same
+append-only discipline as the other telemetry logs). Span attributes carry only
+the same scalars the existing JSONL logs record — counts, scores, quality flags,
+token counts — and **never** raw prompts, redacted text, or generated code.
+
+### Opt-in OTLP export (the single sanctioned egress)
+
+To view traces in a collector such as Jaeger or a Prometheus/Tempo stack, set
+**both** environment variables before starting the backend:
+
+```bash
+export TOKENQUICK_OTEL_EGRESS=true
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318/v1/traces
+```
+
+`OTEL_EXPORTER_OTLP_ENDPOINT` is the standard OTLP-over-HTTP traces endpoint.
+When the gate is off (the default), the OTLP exporter is **never even imported**
+and no endpoint is contacted — it fails closed to local-only.
+
+A minimal way to see traces: run a local Jaeger all-in-one container that exposes
+OTLP on port `4318`, start the backend with the two env vars above set, then open
+the Jaeger UI and look for the `tokenquick.generate` traces. (The collector-run
+details are generic on purpose — you bring your own collector.)
+
+**Security note:** this OTLP path is the **one** outbound network connection
+tracing can make, and it is **OFF by default**. Even with it on, span attributes
+contain only scalar metadata — the same zero-raw-value guarantee as the JSONL
+logs. No prompt content ever leaves the machine.
 
 ---
 

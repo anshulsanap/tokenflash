@@ -187,6 +187,14 @@ Rules:
 - Scope each subtask to a SINGLE file or one tightly-related pair of files, so its
   generated code stays focused and complete. If an area is large, split it further
   rather than bundling many files into one.
+- WEB-TOOL EXCEPTION: WHEN the project is an interactive web tool, UI, page, or
+  browser widget, do NOT scatter it across many separate files. Decompose so the
+  design/logic subtasks feed into a FINAL subtask that produces ONE self-contained,
+  standalone `index.html` — vanilla HTML5 with inline CSS (`<style>`) and inline
+  vanilla JavaScript (`<script>`), no external CDNs, no remote `<script src>`, no
+  Babel, no JSX/React build step — so the assembled result is a single previewable
+  HTML document that runs with no network access. For non-web projects (CLI, API,
+  library, script, game backend, data pipeline) KEEP the existing multi-file split.
 - Every "prompt" MUST end with this exact instruction: "Keep the implementation
   focused and complete; do not pad with extra examples or boilerplate."
 - Keep every "prompt" field under 100 words.
@@ -201,6 +209,11 @@ Be complete and production-ready, but stay focused: implement exactly what the t
 and do NOT pad with extra examples, alternative implementations, or unrelated boilerplate. \
 Put a file-path comment above each file's code block using that language's comment syntax \
 and a path appropriate to the project (e.g. `# rename_tool/cli.py` or `// src/index.js`). \
+When the task asks for an HTML page or an interactive web UI, emit a SINGLE self-contained, \
+standalone HTML document: all CSS in an inline `<style>` and all JavaScript in an inline \
+vanilla `<script>` within that one file — no external CDNs, no remote `<script src>`, no \
+Babel, and no JSX/React build step — so it runs under a strict `connect-src 'none'` CSP \
+with no network access at runtime. \
 No explanations outside of code comments.\
 """
 

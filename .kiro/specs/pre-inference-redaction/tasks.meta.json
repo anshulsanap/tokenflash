@@ -1,0 +1,21 @@
+{
+  "pbtResults": {
+    "6.2 Write property test — audit log never contains raw values": {
+      "status": "passed",
+      "lastRunTimestamp": 1789530132491
+    },
+    "6.3 Write property test — one entry per redaction, append-only": {
+      "status": "passed",
+      "lastRunTimestamp": 1789530133287
+    },
+    "8.3 Write property test — no sensitive value leaks downstream": {
+      "status": "passed",
+      "lastRunTimestamp": 1789530858628
+    },
+    "8.6 Write property test — overlaps resolve to single highest-precedence category": {
+      "status": "passed",
+      "lastRunTimestamp": 1789530859549
+    }
+  },
+  "executionHistory": {}
+}
